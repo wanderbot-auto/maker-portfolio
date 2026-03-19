@@ -75,6 +75,48 @@ func daemonStatusPreservesJSONContract() throws {
     #expect(envelope.data.daemonToken.hasSuffix("daemon.token"))
 }
 
+@Test
+func projectImportListFilterAndDeletePreserveJSONContract() throws {
+    let sandbox = try makeCLISandbox()
+    defer { try? FileManager.default.removeItem(at: sandbox.root) }
+
+    let importRoot = sandbox.root.appendingPathComponent("workspace", isDirectory: true)
+    let swiftProject = importRoot.appendingPathComponent("swift-app", isDirectory: true)
+    let nodeProject = importRoot.appendingPathComponent("services/api", isDirectory: true)
+    try FileManager.default.createDirectory(at: swiftProject, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: nodeProject, withIntermediateDirectories: true)
+    try "import PackageDescription".write(to: swiftProject.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+    try """
+    {"scripts":{"dev":"node server.js"}}
+    """.write(to: nodeProject.appendingPathComponent("package.json"), atomically: true, encoding: .utf8)
+
+    let imported = try runMaker(
+        ["project", "import", importRoot.path, "--recursive", "--tag", "imported", "--status", "active", "--json"],
+        environment: sandbox.environment
+    )
+    let importEnvelope = try decodeEnvelope(ProjectImportPayload.self, from: imported)
+    #expect(importEnvelope.message == "projects_imported")
+    #expect(importEnvelope.data.imported.count == 2)
+    #expect(importEnvelope.data.imported.allSatisfy { $0.project.tags == ["imported"] })
+
+    let filtered = try runMaker(
+        ["project", "list", "--status", "active", "--tag", "imported", "--query", "swift", "--json"],
+        environment: sandbox.environment
+    )
+    let listEnvelope = try decodeEnvelope([ProjectListPayload].self, from: filtered)
+    #expect(listEnvelope.message == "projects_listed")
+    #expect(listEnvelope.data.count == 1)
+
+    let deletedID = try #require(listEnvelope.data.first?.project.id)
+    let deleted = try runMaker(
+        ["project", "delete", deletedID, "--json"],
+        environment: sandbox.environment
+    )
+    let deletedEnvelope = try decodeEnvelope(IdentifierPayload.self, from: deleted)
+    #expect(deletedEnvelope.message == "project_deleted")
+    #expect(deletedEnvelope.data.id == deletedID)
+}
+
 private struct CLISandbox {
     let root: URL
     let packageRoot: URL
@@ -120,6 +162,25 @@ private struct DaemonStatusPayload: Decodable {
     let launchAgent: String
     let daemonToken: String
     let details: String
+}
+
+private struct ProjectImportPayload: Decodable {
+    let imported: [ImportedProjectPayload]
+    let skippedPaths: [String]
+}
+
+private struct ImportedProjectPayload: Decodable {
+    let path: String
+    let project: ProjectPayloadWithTags
+}
+
+private struct ProjectPayloadWithTags: Decodable {
+    let id: String
+    let tags: [String]
+}
+
+private struct ProjectListPayload: Decodable {
+    let project: ProjectPayload
 }
 
 private enum CLITestError: Error, CustomStringConvertible {

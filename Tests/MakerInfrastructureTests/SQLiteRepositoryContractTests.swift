@@ -27,7 +27,7 @@ func migratorBootstrapsSchemaIdempotently() async throws {
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('projects', 'runtime_profiles', 'env_sets', 'env_set_secrets', 'run_sessions', 'milestones', 'project_notes') ORDER BY name;"
     )
 
-    #expect(versionRows.first?["user_version"]?.int64Value == 2)
+    #expect(versionRows.first?["user_version"]?.int64Value == 3)
     #expect(tableRows.count == 7)
 }
 

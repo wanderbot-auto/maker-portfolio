@@ -13,6 +13,7 @@ public struct CoreServices {
     public let scanner: FileSystemProjectScanner
     public let secrets: any SecretsStore
     public let runtimeManager: any RuntimeManager
+    public let healthChecks: any HealthCheckRunner
     public let logStore: LogFileStore
     public let processInspector: any ProcessInspector
     public let database: SQLiteDatabase?
@@ -27,6 +28,7 @@ public struct CoreServices {
         scanner: FileSystemProjectScanner,
         secrets: any SecretsStore,
         runtimeManager: any RuntimeManager,
+        healthChecks: any HealthCheckRunner,
         logStore: LogFileStore,
         processInspector: any ProcessInspector,
         database: SQLiteDatabase? = nil
@@ -40,6 +42,7 @@ public struct CoreServices {
         self.scanner = scanner
         self.secrets = secrets
         self.runtimeManager = runtimeManager
+        self.healthChecks = healthChecks
         self.logStore = logStore
         self.processInspector = processInspector
         self.database = database
@@ -66,6 +69,7 @@ public struct CoreServices {
         )
         let logStore = LogFileStore(logsDirectory: paths.logsDirectory)
         let processInspector = SystemProcessInspector()
+        let healthChecks = DefaultHealthCheckRunner(processInspector: processInspector)
         let runtimeManager = DefaultRuntimeManager(
             adapterFactory: DefaultRuntimeAdapterFactory(),
             sessions: runSessions,
@@ -84,6 +88,7 @@ public struct CoreServices {
             scanner: scanner,
             secrets: secrets,
             runtimeManager: runtimeManager,
+            healthChecks: healthChecks,
             logStore: logStore,
             processInspector: processInspector,
             database: database
@@ -103,6 +108,7 @@ public struct CoreServices {
         try paths.createIfNeeded()
         let logStore = LogFileStore(logsDirectory: paths.logsDirectory)
         let processInspector = SystemProcessInspector()
+        let healthChecks = DefaultHealthCheckRunner(processInspector: processInspector)
         let runtimeManager = DefaultRuntimeManager(
             adapterFactory: DefaultRuntimeAdapterFactory(),
             sessions: runSessions,
@@ -121,6 +127,7 @@ public struct CoreServices {
             scanner: scanner,
             secrets: secrets,
             runtimeManager: runtimeManager,
+            healthChecks: healthChecks,
             logStore: logStore,
             processInspector: processInspector,
             database: nil

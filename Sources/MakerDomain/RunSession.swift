@@ -12,6 +12,11 @@ public struct RunSession: Identifiable, Codable, Equatable, Sendable {
     public var endedAt: Date?
     public var exitCode: Int32?
     public var triggerSource: TriggerSource
+    public var restartCount: Int
+    public var failureReason: String?
+    public var lastHealthCheckStatus: RunHealthStatus?
+    public var lastHealthCheckDetail: String?
+    public var lastHealthCheckAt: Date?
 
     public init(
         id: ID = UUID(),
@@ -22,7 +27,12 @@ public struct RunSession: Identifiable, Codable, Equatable, Sendable {
         startedAt: Date = Date(),
         endedAt: Date? = nil,
         exitCode: Int32? = nil,
-        triggerSource: TriggerSource = .manual
+        triggerSource: TriggerSource = .manual,
+        restartCount: Int = 0,
+        failureReason: String? = nil,
+        lastHealthCheckStatus: RunHealthStatus? = nil,
+        lastHealthCheckDetail: String? = nil,
+        lastHealthCheckAt: Date? = nil
     ) {
         self.id = id
         self.projectID = projectID
@@ -33,6 +43,11 @@ public struct RunSession: Identifiable, Codable, Equatable, Sendable {
         self.endedAt = endedAt
         self.exitCode = exitCode
         self.triggerSource = triggerSource
+        self.restartCount = restartCount
+        self.failureReason = failureReason
+        self.lastHealthCheckStatus = lastHealthCheckStatus
+        self.lastHealthCheckDetail = lastHealthCheckDetail
+        self.lastHealthCheckAt = lastHealthCheckAt
     }
 }
 
@@ -47,4 +62,9 @@ public enum TriggerSource: String, Codable, Sendable, CaseIterable {
     case manual
     case automation
     case recovery
+}
+
+public enum RunHealthStatus: String, Codable, Sendable, CaseIterable {
+    case passing
+    case failing
 }

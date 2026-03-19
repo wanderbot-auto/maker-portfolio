@@ -234,12 +234,15 @@ struct MakerCLI {
             print("运行单元: \(profiles.count)")
 
         case "list":
+            let status = try value(for: "--status", in: arguments).map(parseProjectStatus)
+            let tag = value(for: "--tag", in: arguments)
+            let query = value(for: "--query", in: arguments)
             let useCase = ListProjectsUseCase(
                 projects: services.projects,
                 runtimeProfiles: services.runtimeProfiles,
                 sessions: services.runSessions
             )
-            let items = try await useCase.execute()
+            let items = try await useCase.execute(status: status, tag: tag, query: query)
             if outputFormat == .json {
                 try emitJSON(CLIEnvelope(message: "projects_listed", data: items))
                 return
@@ -256,6 +259,36 @@ struct MakerCLI {
                 print("  标签: \(item.project.tags.joined(separator: ", "))")
                 print("  路径: \(item.project.localPath)")
                 print("  运行单元: \(item.runtimeCount)  最近会话: \(latestStatus)")
+            }
+
+        case "import":
+            guard arguments.count >= 2 else {
+                throw CLIError.usage("用法: maker project import <root-path> [--recursive] [--tag 标签] [--status 状态] [--priority 优先级]")
+            }
+
+            let rootPath = arguments[1]
+            let recursive = arguments.contains("--recursive")
+            let tags = values(for: "--tag", in: arguments)
+            let status = try value(for: "--status", in: arguments).map(parseProjectStatus) ?? .idea
+            let priority = try value(for: "--priority", in: arguments).map(parseProjectPriority) ?? .p2
+            let paths = try services.scanner.discoverProjectPaths(at: rootPath, recursive: recursive)
+            let result = try await ImportProjectsUseCase(
+                projects: services.projects,
+                scanner: services.scanner,
+                runtimeProfiles: services.runtimeProfiles
+            ).execute(paths: paths, tags: tags, status: status, priority: priority)
+            if outputFormat == .json {
+                try emitJSON(CLIEnvelope(message: "projects_imported", data: result))
+                return
+            }
+            print("已导入项目: \(result.imported.count)")
+            if !result.skippedPaths.isEmpty {
+                print("已跳过路径: \(result.skippedPaths.count)")
+            }
+            for item in result.imported {
+                print("[\(item.project.id.uuidString)] \(item.project.name)")
+                print("  路径: \(item.path)")
+                print("  运行单元: \(item.runtimeProfiles.count)")
             }
 
         case "show":
@@ -365,6 +398,19 @@ struct MakerCLI {
             print("仓库类型: \(result.project.repoType.rawValue)")
             print("技术栈: \(result.project.stackSummary)")
             print("新增运行单元: \(result.createdProfiles.count)")
+
+        case "delete":
+            guard arguments.count >= 2 else {
+                throw CLIError.usage("用法: maker project delete <project-id>")
+            }
+
+            let projectID = try parseUUID(arguments[1])
+            try await DeleteProjectUseCase(projects: services.projects).execute(projectID: projectID)
+            if outputFormat == .json {
+                try emitJSON(CLIEnvelope(message: "project_deleted", data: CLIIdentifierResponse(id: projectID.uuidString)))
+                return
+            }
+            print("已删除项目: \(projectID.uuidString)")
 
         default:
             throw CLIError.usage("未知 project 子命令: \(subcommand)\n\n\(helpText)")
@@ -1359,7 +1405,7 @@ struct MakerCLI {
                     DiagnosticCheck(
                         name: item.sessionID.uuidString,
                         level: level,
-                        detail: "project=\(item.projectID.uuidString) profile=\(item.runtimeProfileID.uuidString) pid=\(pid) processRunning=\(item.processRunning)"
+                        detail: "project=\(item.projectID.uuidString) profile=\(item.runtimeProfileID.uuidString) pid=\(pid) processRunning=\(item.processRunning) restarts=\(item.restartCount) health=\(item.lastHealthCheckStatus?.rawValue ?? "-") failure=\(item.failureReason ?? "-")"
                     )
                 )
             }
@@ -1575,6 +1621,18 @@ struct MakerCLI {
             if let pid = session.pid {
                 print("PID: \(pid)")
             }
+            if let restartCount = session.restartCount {
+                print("重启次数: \(restartCount)")
+            }
+            if let exitCode = session.exitCode {
+                print("exitCode: \(exitCode)")
+            }
+            if let health = session.lastHealthCheckStatus {
+                print("健康检查: \(health)\(session.lastHealthCheckDetail.map { " \($0)" } ?? "")")
+            }
+            if let failureReason = session.failureReason {
+                print("失败原因: \(failureReason)")
+            }
             return
         }
 
@@ -1740,6 +1798,13 @@ struct MakerCLI {
         }
         if let exitCode = session.exitCode {
             print("  exitCode: \(exitCode)")
+        }
+        print("  restartCount: \(session.restartCount)")
+        if let health = session.lastHealthCheckStatus?.rawValue {
+            print("  health: \(health)\(session.lastHealthCheckDetail.map { " \($0)" } ?? "")")
+        }
+        if let failureReason = session.failureReason {
+            print("  failure: \(failureReason)")
         }
         print("  trigger: \(session.triggerSource.rawValue)")
     }
@@ -1960,12 +2025,14 @@ Maker CLI
   maker milestone remove <milestone-id>
 
   maker project add <path> [--description 文本] [--tag 标签]
-  maker project list
+  maker project import <root-path> [--recursive] [--tag 标签] [--status 状态] [--priority 优先级]
+  maker project list [--status 状态] [--tag 标签] [--query 关键字]
   maker project show <project-id>
   maker project update <project-id> [--name 名称] [--description 文本] [--status 状态] [--priority 优先级]
   maker project archive <project-id>
   maker project unarchive <project-id> [--status 状态]
   maker project rescan <project-id>
+  maker project delete <project-id>
 
   maker env list <project-id>
   maker env set <project-id> <env-name> KEY=VALUE [KEY=VALUE ...]

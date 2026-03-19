@@ -26,6 +26,10 @@ public actor InMemoryProjectRepository: ProjectRepository {
         project.updatedAt = at
         storage[id] = project
     }
+
+    public func delete(id: Project.ID) async throws {
+        storage.removeValue(forKey: id)
+    }
 }
 
 public actor InMemoryRuntimeProfileRepository: RuntimeProfileRepository {

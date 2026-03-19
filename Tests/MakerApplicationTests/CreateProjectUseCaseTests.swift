@@ -31,7 +31,17 @@ actor ProjectRepositorySpy: ProjectRepository {
         projects[project.id] = project
     }
 
-    func archive(id: Project.ID, at: Date) async throws {}
+    func archive(id: Project.ID, at: Date) async throws {
+        guard var project = projects[id] else { return }
+        project.status = .archived
+        project.archivedAt = at
+        project.updatedAt = at
+        projects[id] = project
+    }
+
+    func delete(id: Project.ID) async throws {
+        projects.removeValue(forKey: id)
+    }
 }
 
 struct ProjectScannerStub: ProjectScanner {

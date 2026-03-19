@@ -64,6 +64,28 @@ public struct ProjectRescanResult: Sendable, Equatable, Codable {
     }
 }
 
+public struct ProjectImportItem: Sendable, Equatable, Codable {
+    public var path: String
+    public var project: Project
+    public var runtimeProfiles: [RuntimeProfile]
+
+    public init(path: String, project: Project, runtimeProfiles: [RuntimeProfile]) {
+        self.path = path
+        self.project = project
+        self.runtimeProfiles = runtimeProfiles
+    }
+}
+
+public struct ProjectImportResult: Sendable, Equatable, Codable {
+    public var imported: [ProjectImportItem]
+    public var skippedPaths: [String]
+
+    public init(imported: [ProjectImportItem], skippedPaths: [String]) {
+        self.imported = imported
+        self.skippedPaths = skippedPaths
+    }
+}
+
 public struct EnvSetSnapshot: Sendable, Equatable, Codable {
     public var envSet: EnvSet
     public var resolvedVariables: [String: String]
@@ -172,6 +194,11 @@ public struct RuntimeSessionDiagnosticItem: Sendable, Equatable, Codable {
     public var status: RunSessionStatus
     public var pid: Int32?
     public var processRunning: Bool
+    public var restartCount: Int
+    public var failureReason: String?
+    public var lastHealthCheckStatus: RunHealthStatus?
+    public var lastHealthCheckDetail: String?
+    public var lastHealthCheckAt: Date?
 
     public init(
         sessionID: RunSession.ID,
@@ -179,7 +206,12 @@ public struct RuntimeSessionDiagnosticItem: Sendable, Equatable, Codable {
         runtimeProfileID: RuntimeProfile.ID,
         status: RunSessionStatus,
         pid: Int32?,
-        processRunning: Bool
+        processRunning: Bool,
+        restartCount: Int,
+        failureReason: String?,
+        lastHealthCheckStatus: RunHealthStatus?,
+        lastHealthCheckDetail: String?,
+        lastHealthCheckAt: Date?
     ) {
         self.sessionID = sessionID
         self.projectID = projectID
@@ -187,6 +219,11 @@ public struct RuntimeSessionDiagnosticItem: Sendable, Equatable, Codable {
         self.status = status
         self.pid = pid
         self.processRunning = processRunning
+        self.restartCount = restartCount
+        self.failureReason = failureReason
+        self.lastHealthCheckStatus = lastHealthCheckStatus
+        self.lastHealthCheckDetail = lastHealthCheckDetail
+        self.lastHealthCheckAt = lastHealthCheckAt
     }
 }
 

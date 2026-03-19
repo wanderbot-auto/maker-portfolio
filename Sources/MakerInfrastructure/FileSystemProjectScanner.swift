@@ -63,16 +63,104 @@ public struct FileSystemProjectScanner: ProjectScanner {
             )
         }
         if fileNames.contains("package.json") {
-            profiles.append(
+            profiles.append(contentsOf: npmProfiles(workingDir: workingDir))
+        }
+
+        return deduplicate(profiles)
+    }
+
+    public func discoverProjectPaths(at rootPath: String, recursive: Bool = true) throws -> [String] {
+        let rootURL = URL(fileURLWithPath: rootPath)
+        let resourceValues = try rootURL.resourceValues(forKeys: [.isDirectoryKey])
+        guard resourceValues.isDirectory == true else {
+            throw CocoaError(.fileReadUnknown)
+        }
+
+        if recursive == false {
+            let fileNames = try Set(FileManager.default.contentsOfDirectory(atPath: rootPath))
+            return isProjectRoot(fileNames: fileNames) ? [rootPath] : []
+        }
+
+        var matches: Set<String> = []
+        let keys: [URLResourceKey] = [.isDirectoryKey, .nameKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: rootURL,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        while let item = enumerator.nextObject() as? URL {
+            let values = try item.resourceValues(forKeys: Set(keys))
+            guard values.isDirectory == true else {
+                continue
+            }
+
+            let name = values.name ?? item.lastPathComponent
+            if ["node_modules", ".build", "build", "dist", ".git", ".swiftpm"].contains(name) {
+                enumerator.skipDescendants()
+                continue
+            }
+
+            let fileNames = try Set(FileManager.default.contentsOfDirectory(atPath: item.path))
+            if isProjectRoot(fileNames: fileNames) {
+                matches.insert(item.path)
+            }
+        }
+
+        if matches.isEmpty, let fileNames = try? Set(FileManager.default.contentsOfDirectory(atPath: rootPath)), isProjectRoot(fileNames: fileNames) {
+            matches.insert(rootPath)
+        }
+
+        return Array(matches).sorted()
+    }
+
+    private func npmProfiles(workingDir: String) -> [DiscoveredRuntimeProfile] {
+        let packageURL = URL(fileURLWithPath: workingDir).appendingPathComponent("package.json")
+        guard
+            let data = try? Data(contentsOf: packageURL),
+            let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let scripts = payload["scripts"] as? [String: Any]
+        else {
+            return [
                 DiscoveredRuntimeProfile(
                     name: "npm-dev",
                     entryCommand: "npm",
                     workingDir: workingDir,
                     args: ["run", "dev"]
                 )
-            )
+            ]
         }
 
-        return profiles
+        let preferredScripts = ["dev", "start", "web", "api", "worker"]
+        return preferredScripts.compactMap { name in
+            guard scripts[name] != nil else { return nil }
+            return DiscoveredRuntimeProfile(
+                name: "npm-\(name)",
+                entryCommand: "npm",
+                workingDir: workingDir,
+                args: ["run", name]
+            )
+        }
+    }
+
+    private func isProjectRoot(fileNames: Set<String>) -> Bool {
+        let markers = [".git", "Package.swift", "package.json", "Cargo.toml", "pubspec.yaml", "Podfile"]
+        return markers.contains { fileNames.contains($0) }
+    }
+
+    private func deduplicate(_ profiles: [DiscoveredRuntimeProfile]) -> [DiscoveredRuntimeProfile] {
+        var seen: Set<String> = []
+        var unique: [DiscoveredRuntimeProfile] = []
+
+        for profile in profiles {
+            let key = ([profile.name, profile.entryCommand, profile.workingDir] + profile.args).joined(separator: "\u{1F}")
+            if seen.insert(key).inserted {
+                unique.append(profile)
+            }
+        }
+
+        return unique
     }
 }

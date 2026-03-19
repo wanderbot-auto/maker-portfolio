@@ -56,6 +56,22 @@ public protocol RuntimeManager: Sendable {
     func logs(sessionID: RunSession.ID) -> AsyncThrowingStream<LogEvent, Error>
 }
 
+public struct HealthCheckResult: Sendable, Equatable {
+    public var status: RunHealthStatus
+    public var detail: String
+    public var checkedAt: Date
+
+    public init(status: RunHealthStatus, detail: String, checkedAt: Date = Date()) {
+        self.status = status
+        self.detail = detail
+        self.checkedAt = checkedAt
+    }
+}
+
+public protocol HealthCheckRunner: Sendable {
+    func evaluate(profile: RuntimeProfile, session: RunSession) async -> HealthCheckResult
+}
+
 public protocol RuntimeLogReader: Sendable {
     func readRecent(sessionID: RunSession.ID, tail: Int) async throws -> RuntimeLogChunk
     func readAfter(sessionID: RunSession.ID, line: Int) async throws -> RuntimeLogChunk

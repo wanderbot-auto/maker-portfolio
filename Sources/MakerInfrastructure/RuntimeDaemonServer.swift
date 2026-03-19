@@ -95,7 +95,9 @@ public final class RuntimeDaemonServer: @unchecked Sendable {
             let session = try await StartRuntimeUseCase(
                 projects: services.projects,
                 runtimeProfiles: services.runtimeProfiles,
-                runtimeManager: services.runtimeManager
+                runtimeManager: services.runtimeManager,
+                sessions: services.runSessions,
+                healthChecks: services.healthChecks
             ).execute(projectID: projectID, runtimeProfileID: profileID)
 
             let snapshot = RuntimeSessionSnapshot(
@@ -106,7 +108,7 @@ public final class RuntimeDaemonServer: @unchecked Sendable {
                 pid: session.pid
             )
             activeSessions[session.id] = snapshot
-            return DaemonResponse(ok: true, message: "started", session: DaemonSessionSummary(snapshot: snapshot))
+            return DaemonResponse(ok: true, message: "started", session: DaemonSessionSummary(session: session))
 
         case "runtime.stop":
             guard let sessionID = request.sessionID.flatMap(UUID.init(uuidString:)) else {
@@ -117,12 +119,15 @@ public final class RuntimeDaemonServer: @unchecked Sendable {
             if var snapshot = activeSessions[sessionID] {
                 snapshot.status = .stopped
                 activeSessions[sessionID] = snapshot
+                if let session = try await services.runSessions.get(id: sessionID) {
+                    return DaemonResponse(ok: true, message: "stopped", session: DaemonSessionSummary(session: session))
+                }
                 return DaemonResponse(ok: true, message: "stopped", session: DaemonSessionSummary(snapshot: snapshot))
             }
 
-            if let snapshot = try await RuntimeStatusUseCase(sessions: services.runSessions).execute(sessionID: sessionID) {
+            if let session = try await services.runSessions.get(id: sessionID) {
                 activeSessions.removeValue(forKey: sessionID)
-                return DaemonResponse(ok: true, message: "stopped", session: DaemonSessionSummary(snapshot: snapshot))
+                return DaemonResponse(ok: true, message: "stopped", session: DaemonSessionSummary(session: session))
             }
             return DaemonResponse(ok: true, message: "stopped")
 
@@ -135,7 +140,8 @@ public final class RuntimeDaemonServer: @unchecked Sendable {
                 runtimeManager: services.runtimeManager,
                 projects: services.projects,
                 runtimeProfiles: services.runtimeProfiles,
-                sessions: services.runSessions
+                sessions: services.runSessions,
+                healthChecks: services.healthChecks
             ).execute(sessionID: sessionID)
             let snapshot = RuntimeSessionSnapshot(
                 sessionID: session.id,
@@ -145,20 +151,26 @@ public final class RuntimeDaemonServer: @unchecked Sendable {
                 pid: session.pid
             )
             activeSessions[session.id] = snapshot
-            return DaemonResponse(ok: true, message: "restarted", session: DaemonSessionSummary(snapshot: snapshot))
+            return DaemonResponse(ok: true, message: "restarted", session: DaemonSessionSummary(session: session))
 
         case "runtime.status":
             guard let sessionID = request.sessionID.flatMap(UUID.init(uuidString:)) else {
                 return DaemonResponse(ok: false, message: "invalid session id")
             }
 
-            if let snapshot = try await RuntimeStatusUseCase(sessions: services.runSessions).execute(sessionID: sessionID) {
-                if snapshot.status == .running {
-                    activeSessions[sessionID] = snapshot
+            if let session = try await services.runSessions.get(id: sessionID) {
+                if session.status == .running {
+                    activeSessions[sessionID] = RuntimeSessionSnapshot(
+                        sessionID: session.id,
+                        projectID: session.projectID,
+                        runtimeProfileID: session.runtimeProfileID,
+                        status: session.status,
+                        pid: session.pid
+                    )
                 } else {
                     activeSessions.removeValue(forKey: sessionID)
                 }
-                return DaemonResponse(ok: true, message: "status", session: DaemonSessionSummary(snapshot: snapshot))
+                return DaemonResponse(ok: true, message: "status", session: DaemonSessionSummary(session: session))
             }
             activeSessions.removeValue(forKey: sessionID)
             return DaemonResponse(ok: false, message: "session not found")
@@ -166,10 +178,17 @@ public final class RuntimeDaemonServer: @unchecked Sendable {
         case "runtime.active":
             var refreshed: [DaemonSessionSummary] = []
             for sessionID in activeSessions.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
-                if let snapshot = try await RuntimeStatusUseCase(sessions: services.runSessions).execute(sessionID: sessionID),
-                   snapshot.status == .running {
+                if let session = try await services.runSessions.get(id: sessionID),
+                   session.status == .running {
+                    let snapshot = RuntimeSessionSnapshot(
+                        sessionID: session.id,
+                        projectID: session.projectID,
+                        runtimeProfileID: session.runtimeProfileID,
+                        status: session.status,
+                        pid: session.pid
+                    )
                     activeSessions[sessionID] = snapshot
-                    refreshed.append(DaemonSessionSummary(snapshot: snapshot))
+                    refreshed.append(DaemonSessionSummary(session: session))
                 } else {
                     activeSessions.removeValue(forKey: sessionID)
                 }
@@ -188,7 +207,8 @@ public final class RuntimeDaemonServer: @unchecked Sendable {
                     projectID: $0.projectID.uuidString,
                     runtimeProfileID: $0.runtimeProfileID.uuidString,
                     status: $0.status.rawValue,
-                    pid: $0.pid
+                    pid: $0.pid,
+                    exitCode: $0.exitCode
                 )
             }
             return DaemonResponse(ok: true, message: "history", sessions: summaries)
@@ -233,7 +253,13 @@ public final class RuntimeDaemonServer: @unchecked Sendable {
                 projectID: snapshot.projectID.uuidString,
                 runtimeProfileID: snapshot.runtimeProfileID.uuidString,
                 status: snapshot.status?.rawValue ?? "unknown",
-                pid: snapshot.pid
+                pid: snapshot.pid,
+                exitCode: try await services.runSessions.get(id: sessionID)?.exitCode,
+                restartCount: try await services.runSessions.get(id: sessionID)?.restartCount,
+                failureReason: try await services.runSessions.get(id: sessionID)?.failureReason,
+                lastHealthCheckStatus: try await services.runSessions.get(id: sessionID)?.lastHealthCheckStatus?.rawValue,
+                lastHealthCheckDetail: try await services.runSessions.get(id: sessionID)?.lastHealthCheckDetail,
+                lastHealthCheckAt: try await services.runSessions.get(id: sessionID)?.lastHealthCheckAt
             )
             return DaemonResponse(
                 ok: true,

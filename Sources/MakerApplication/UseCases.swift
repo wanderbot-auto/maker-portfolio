@@ -59,11 +59,26 @@ public struct ListProjectsUseCase: Sendable {
         self.sessions = sessions
     }
 
-    public func execute() async throws -> [ProjectListItem] {
-        let projects = try await projects.list()
+    public func execute(
+        status: ProjectStatus? = nil,
+        tag: String? = nil,
+        query: String? = nil
+    ) async throws -> [ProjectListItem] {
+        let filteredProjects = try await projects.list().filter { project in
+            if let status, project.status != status {
+                return false
+            }
+            if let tag, !tag.isEmpty, project.tags.contains(tag) == false {
+                return false
+            }
+            if let query, !query.isEmpty, matches(project: project, query: query) == false {
+                return false
+            }
+            return true
+        }
         var items: [ProjectListItem] = []
 
-        for project in projects {
+        for project in filteredProjects {
             let profiles = try await runtimeProfiles.list(projectID: project.id)
             let latestSession = try await sessions.list(projectID: project.id, limit: 1).first
             items.append(
@@ -76,6 +91,18 @@ public struct ListProjectsUseCase: Sendable {
         }
 
         return items
+    }
+
+    private func matches(project: Project, query: String) -> Bool {
+        let needle = query.lowercased()
+        let fields = [
+            project.name,
+            project.slug,
+            project.localPath,
+            project.description,
+            project.stackSummary
+        ] + project.tags
+        return fields.contains { $0.lowercased().contains(needle) }
     }
 }
 
@@ -190,6 +217,21 @@ public struct ArchiveProjectUseCase: Sendable {
     }
 }
 
+public struct DeleteProjectUseCase: Sendable {
+    private let projects: any ProjectRepository
+
+    public init(projects: any ProjectRepository) {
+        self.projects = projects
+    }
+
+    public func execute(projectID: Project.ID) async throws {
+        guard try await projects.get(id: projectID) != nil else {
+            throw MakerError.missingResource("Project \(projectID.uuidString) not found")
+        }
+        try await projects.delete(id: projectID)
+    }
+}
+
 public struct UnarchiveProjectUseCase: Sendable {
     private let projects: any ProjectRepository
 
@@ -262,6 +304,70 @@ public struct RescanProjectUseCase: Sendable {
         }
 
         return ProjectRescanResult(project: project, createdProfiles: createdProfiles, scanResult: scanResult)
+    }
+}
+
+public struct ImportProjectsUseCase: Sendable {
+    private let projects: any ProjectRepository
+    private let scanner: any ProjectScanner
+    private let runtimeProfiles: any RuntimeProfileRepository
+
+    public init(
+        projects: any ProjectRepository,
+        scanner: any ProjectScanner,
+        runtimeProfiles: any RuntimeProfileRepository
+    ) {
+        self.projects = projects
+        self.scanner = scanner
+        self.runtimeProfiles = runtimeProfiles
+    }
+
+    public func execute(
+        paths: [String],
+        tags: [String] = [],
+        status: ProjectStatus = .idea,
+        priority: ProjectPriority = .p2
+    ) async throws -> ProjectImportResult {
+        let uniquePaths = Array(Set(paths)).sorted()
+        let existingPaths = Set(try await projects.list().map(\.localPath))
+        var imported: [ProjectImportItem] = []
+        var skippedPaths: [String] = []
+
+        for path in uniquePaths {
+            guard existingPaths.contains(path) == false else {
+                skippedPaths.append(path)
+                continue
+            }
+
+            let scanResult = try await scanner.scan(at: path)
+            let project = Project(
+                name: scanResult.suggestedName,
+                localPath: path,
+                repoType: scanResult.repoType,
+                status: status,
+                priority: priority,
+                tags: tags,
+                stackSummary: scanResult.stackSummary
+            )
+            try await projects.save(project)
+
+            var profiles: [RuntimeProfile] = []
+            for discovered in scanResult.discoveredProfiles {
+                let profile = RuntimeProfile(
+                    projectID: project.id,
+                    name: discovered.name,
+                    entryCommand: discovered.entryCommand,
+                    workingDir: discovered.workingDir,
+                    args: discovered.args
+                )
+                try await runtimeProfiles.save(profile)
+                profiles.append(profile)
+            }
+
+            imported.append(ProjectImportItem(path: path, project: project, runtimeProfiles: profiles))
+        }
+
+        return ProjectImportResult(imported: imported, skippedPaths: skippedPaths)
     }
 }
 
@@ -508,15 +614,21 @@ public struct StartRuntimeUseCase: Sendable {
     private let projects: any ProjectRepository
     private let runtimeProfiles: any RuntimeProfileRepository
     private let runtimeManager: any RuntimeManager
+    private let sessions: any RunSessionRepository
+    private let healthChecks: any HealthCheckRunner
 
     public init(
         projects: any ProjectRepository,
         runtimeProfiles: any RuntimeProfileRepository,
-        runtimeManager: any RuntimeManager
+        runtimeManager: any RuntimeManager,
+        sessions: any RunSessionRepository,
+        healthChecks: any HealthCheckRunner
     ) {
         self.projects = projects
         self.runtimeProfiles = runtimeProfiles
         self.runtimeManager = runtimeManager
+        self.sessions = sessions
+        self.healthChecks = healthChecks
     }
 
     public func execute(projectID: Project.ID, runtimeProfileID: RuntimeProfile.ID) async throws -> RunSession {
@@ -526,7 +638,87 @@ public struct StartRuntimeUseCase: Sendable {
         guard let profile = try await runtimeProfiles.get(id: runtimeProfileID) else {
             throw NSError(domain: "MakerApplication.StartRuntimeUseCase", code: 404, userInfo: [NSLocalizedDescriptionKey: "Runtime profile not found"])
         }
-        return try await runtimeManager.start(project: project, profile: profile)
+        return try await ensureRunning(project: project, profile: profile, stack: [])
+    }
+
+    private func ensureRunning(
+        project: Project,
+        profile: RuntimeProfile,
+        stack: [RuntimeProfile.ID]
+    ) async throws -> RunSession {
+        if stack.contains(profile.id) {
+            throw MakerError.invalidConfiguration("Runtime dependency cycle detected.")
+        }
+
+        for dependencyID in profile.dependsOn {
+            guard let dependency = try await runtimeProfiles.get(id: dependencyID) else {
+                throw MakerError.missingResource("Runtime profile \(dependencyID.uuidString) not found")
+            }
+            _ = try await ensureRunning(project: project, profile: dependency, stack: stack + [profile.id])
+        }
+
+        if let running = try await sessions.listRunning().first(where: {
+            $0.projectID == project.id && $0.runtimeProfileID == profile.id
+        }) {
+            return running
+        }
+
+        let maximumAttempts = profile.autoRestart ? 3 : 1
+        var lastError: Error?
+
+        for _ in 0..<maximumAttempts {
+            let session = try await runtimeManager.start(project: project, profile: profile)
+            do {
+                return try await waitForHealthIfNeeded(session: session, profile: profile)
+            } catch {
+                lastError = error
+                try? await runtimeManager.stop(sessionID: session.id)
+            }
+        }
+
+        throw lastError ?? MakerError.invalidConfiguration("Unable to start runtime profile \(profile.name).")
+    }
+
+    private func waitForHealthIfNeeded(session: RunSession, profile: RuntimeProfile) async throws -> RunSession {
+        guard profile.healthCheckType != .none else {
+            return session
+        }
+
+        let deadline = Date().addingTimeInterval(8)
+        var latestSession = session
+
+        while Date() < deadline {
+            guard let reloaded = try await sessions.get(id: session.id) else {
+                throw MakerError.missingResource("Run session \(session.id.uuidString) not found")
+            }
+            latestSession = reloaded
+
+            let result = await healthChecks.evaluate(profile: profile, session: latestSession)
+            latestSession = try await recordHealth(session: latestSession, result: result)
+            if result.status == .passing {
+                return latestSession
+            }
+
+            try await Task.sleep(for: .milliseconds(400))
+        }
+
+        latestSession.status = .failed
+        latestSession.failureReason = "health check timeout"
+        latestSession.endedAt = Date()
+        try await sessions.update(latestSession)
+        throw MakerError.invalidConfiguration("Health check timed out for runtime profile \(profile.name).")
+    }
+
+    private func recordHealth(session: RunSession, result: HealthCheckResult) async throws -> RunSession {
+        var updated = session
+        updated.lastHealthCheckStatus = result.status
+        updated.lastHealthCheckDetail = result.detail
+        updated.lastHealthCheckAt = result.checkedAt
+        if result.status == .passing {
+            updated.failureReason = nil
+        }
+        try await sessions.update(updated)
+        return updated
     }
 }
 
@@ -547,17 +739,20 @@ public struct RestartRuntimeUseCase: Sendable {
     private let projects: (any ProjectRepository)?
     private let runtimeProfiles: (any RuntimeProfileRepository)?
     private let sessions: (any RunSessionRepository)?
+    private let healthChecks: (any HealthCheckRunner)?
 
     public init(
         runtimeManager: any RuntimeManager,
         projects: (any ProjectRepository)? = nil,
         runtimeProfiles: (any RuntimeProfileRepository)? = nil,
-        sessions: (any RunSessionRepository)? = nil
+        sessions: (any RunSessionRepository)? = nil,
+        healthChecks: (any HealthCheckRunner)? = nil
     ) {
         self.runtimeManager = runtimeManager
         self.projects = projects
         self.runtimeProfiles = runtimeProfiles
         self.sessions = sessions
+        self.healthChecks = healthChecks
     }
 
     public func execute(sessionID: RunSession.ID) async throws -> RunSession {
@@ -572,6 +767,7 @@ public struct RestartRuntimeUseCase: Sendable {
                 let projects,
                 let runtimeProfiles,
                 let sessions,
+                let healthChecks,
                 let previousSession = try await sessions.get(id: sessionID),
                 let project = try await projects.get(id: previousSession.projectID),
                 let profile = try await runtimeProfiles.get(id: previousSession.runtimeProfileID)
@@ -579,7 +775,13 @@ public struct RestartRuntimeUseCase: Sendable {
                 throw error
             }
 
-            return try await runtimeManager.start(project: project, profile: profile)
+            return try await StartRuntimeUseCase(
+                projects: projects,
+                runtimeProfiles: runtimeProfiles,
+                runtimeManager: runtimeManager,
+                sessions: sessions,
+                healthChecks: healthChecks
+            ).execute(projectID: project.id, runtimeProfileID: profile.id)
         }
     }
 }
@@ -702,10 +904,10 @@ public struct DiagnoseRuntimeSessionsUseCase: Sendable {
     }
 
     public func execute() async throws -> [RuntimeSessionDiagnosticItem] {
-        let runningSessions = try await sessions.listRunning()
+        let recentSessions = try await sessions.listAll(limit: 50, status: nil)
         var items: [RuntimeSessionDiagnosticItem] = []
 
-        for session in runningSessions {
+        for session in recentSessions where session.status == .running || session.failureReason != nil {
             let processRunning: Bool
             if let pid = session.pid {
                 processRunning = await processInspector.isProcessRunning(pid: pid)
@@ -720,7 +922,12 @@ public struct DiagnoseRuntimeSessionsUseCase: Sendable {
                     runtimeProfileID: session.runtimeProfileID,
                     status: session.status,
                     pid: session.pid,
-                    processRunning: processRunning
+                    processRunning: processRunning,
+                    restartCount: session.restartCount,
+                    failureReason: session.failureReason,
+                    lastHealthCheckStatus: session.lastHealthCheckStatus,
+                    lastHealthCheckDetail: session.lastHealthCheckDetail,
+                    lastHealthCheckAt: session.lastHealthCheckAt
                 )
             )
         }

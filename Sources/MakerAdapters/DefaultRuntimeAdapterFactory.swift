@@ -38,6 +38,10 @@ public actor UnsupportedRuntimeAdapter: RuntimeAdapter {
         .idle
     }
 
+    public func lastExitCode() async -> Int32? {
+        nil
+    }
+
     public nonisolated func streamLogs() -> AsyncThrowingStream<LogEvent, Error> {
         AsyncThrowingStream { continuation in
             continuation.finish()

@@ -77,6 +77,10 @@ public actor SQLiteProjectRepository: ProjectRepository {
         )
     }
 
+    public func delete(id: Project.ID) async throws {
+        try database.execute("DELETE FROM projects WHERE id = ?;", bindings: [.text(id.uuidString)])
+    }
+
     private func decodeProject(from row: SQLiteRow) throws -> Project {
         Project(
             id: try uuid(row, "id"),
@@ -324,8 +328,9 @@ public actor SQLiteRunSessionRepository: RunSessionRepository {
         try database.execute(
             """
             INSERT INTO run_sessions (
-                id, project_id, runtime_profile_id, status, pid, started_at, ended_at, exit_code, trigger_source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                id, project_id, runtime_profile_id, status, pid, started_at, ended_at, exit_code, trigger_source,
+                restart_count, failure_reason, last_health_check_status, last_health_check_detail, last_health_check_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 project_id = excluded.project_id,
                 runtime_profile_id = excluded.runtime_profile_id,
@@ -334,7 +339,12 @@ public actor SQLiteRunSessionRepository: RunSessionRepository {
                 started_at = excluded.started_at,
                 ended_at = excluded.ended_at,
                 exit_code = excluded.exit_code,
-                trigger_source = excluded.trigger_source;
+                trigger_source = excluded.trigger_source,
+                restart_count = excluded.restart_count,
+                failure_reason = excluded.failure_reason,
+                last_health_check_status = excluded.last_health_check_status,
+                last_health_check_detail = excluded.last_health_check_detail,
+                last_health_check_at = excluded.last_health_check_at;
             """,
             bindings: [
                 .text(session.id.uuidString),
@@ -345,7 +355,12 @@ public actor SQLiteRunSessionRepository: RunSessionRepository {
                 .real(session.startedAt.timeIntervalSince1970),
                 session.endedAt.map { .real($0.timeIntervalSince1970) } ?? .null,
                 session.exitCode.map { .integer(Int64($0)) } ?? .null,
-                .text(session.triggerSource.rawValue)
+                .text(session.triggerSource.rawValue),
+                .integer(Int64(session.restartCount)),
+                session.failureReason.map(SQLiteValue.text) ?? .null,
+                session.lastHealthCheckStatus.map { .text($0.rawValue) } ?? .null,
+                session.lastHealthCheckDetail.map(SQLiteValue.text) ?? .null,
+                session.lastHealthCheckAt.map { .real($0.timeIntervalSince1970) } ?? .null
             ]
         )
     }
@@ -360,7 +375,12 @@ public actor SQLiteRunSessionRepository: RunSessionRepository {
             startedAt: date(row, "started_at"),
             endedAt: optionalDate(row, "ended_at"),
             exitCode: optionalInteger(row, "exit_code").map(Int32.init),
-            triggerSource: enumValue(row, "trigger_source")
+            triggerSource: enumValue(row, "trigger_source"),
+            restartCount: Int(optionalInteger(row, "restart_count") ?? 0),
+            failureReason: optionalText(row, "failure_reason"),
+            lastHealthCheckStatus: optionalEnumValue(row, "last_health_check_status"),
+            lastHealthCheckDetail: optionalText(row, "last_health_check_detail"),
+            lastHealthCheckAt: optionalDate(row, "last_health_check_at")
         )
     }
 }
@@ -523,4 +543,11 @@ private func enumValue<T: RawRepresentable>(_ row: SQLiteRow, _ column: String) 
         throw SQLiteError(code: SQLITE_MISMATCH, message: "Expected enum raw value in column \(column)")
     }
     return typed
+}
+
+private func optionalEnumValue<T: RawRepresentable>(_ row: SQLiteRow, _ column: String) -> T? where T.RawValue == String {
+    guard let value = row[column]?.stringValue else {
+        return nil
+    }
+    return T(rawValue: value)
 }

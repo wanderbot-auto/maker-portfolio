@@ -9,6 +9,8 @@ public actor LocalProcessAdapter: RuntimeAdapter {
     private var process: Process?
     private var state: RuntimeProcessState = .idle
     private var continuation: AsyncThrowingStream<LogEvent, Error>.Continuation?
+    private var lastExitCodeValue: Int32?
+    private var isStopping = false
 
     public init() {}
 
@@ -40,6 +42,8 @@ public actor LocalProcessAdapter: RuntimeAdapter {
 
         bind(pipe: stdout, stream: .stdout)
         bind(pipe: stderr, stream: .stderr)
+        lastExitCodeValue = nil
+        isStopping = false
 
         process.terminationHandler = { [weak self] terminatedProcess in
             Task {
@@ -60,11 +64,9 @@ public actor LocalProcessAdapter: RuntimeAdapter {
             throw MakerError.processNotRunning
         }
 
+        isStopping = true
         process.terminate()
-        self.process = nil
-        state = .stopped
         yield(.system, "Stopped PID \(process.processIdentifier)")
-        continuation?.finish()
     }
 
     public func restart() async throws -> RuntimeExecutionHandle {
@@ -76,6 +78,10 @@ public actor LocalProcessAdapter: RuntimeAdapter {
 
     public func getStatus() async -> RuntimeProcessState {
         state
+    }
+
+    public func lastExitCode() async -> Int32? {
+        lastExitCodeValue
     }
 
     public nonisolated func streamLogs() -> AsyncThrowingStream<LogEvent, Error> {
@@ -103,10 +109,15 @@ public actor LocalProcessAdapter: RuntimeAdapter {
     }
 
     private func handleTermination(of process: Process) {
-        state = process.terminationStatus == 0 ? .stopped : .failed
+        lastExitCodeValue = process.terminationStatus
+        if isStopping || process.terminationStatus == 0 {
+            state = .stopped
+        } else {
+            state = .failed
+        }
         yield(.system, "Process exited with code \(process.terminationStatus)")
         self.process = nil
-        continuation?.finish()
+        isStopping = false
     }
 
     private func yield(_ stream: LogEvent.Stream, _ message: String) {

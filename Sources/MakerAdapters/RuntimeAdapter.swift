@@ -26,6 +26,7 @@ public protocol RuntimeAdapter: Sendable {
     func stop() async throws
     func restart() async throws -> RuntimeExecutionHandle
     func getStatus() async -> RuntimeProcessState
+    func lastExitCode() async -> Int32?
     func streamLogs() -> AsyncThrowingStream<LogEvent, Error>
 }
 

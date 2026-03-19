@@ -12,6 +12,7 @@ public actor DefaultRuntimeManager: RuntimeManager {
     private let logStore: LogFileStore
 
     private var activeAdapters: [RunSession.ID: any RuntimeAdapter] = [:]
+    private var activeProfiles: [RunSession.ID: RuntimeProfile] = [:]
     private var monitorTasks: [RunSession.ID: Task<Void, Never>] = [:]
 
     public init(
@@ -43,6 +44,7 @@ public actor DefaultRuntimeManager: RuntimeManager {
         )
         try await sessions.save(session)
         activeAdapters[session.id] = adapter
+        activeProfiles[session.id] = profile
         monitorTasks[session.id] = monitorLifecycle(for: session.id, adapter: adapter)
         attachLogStreaming(from: adapter, sessionID: session.id)
         return session
@@ -56,14 +58,16 @@ public actor DefaultRuntimeManager: RuntimeManager {
             try await adapter.stop()
         } catch MakerError.processNotRunning {
             let state = await adapter.getStatus()
-            try await applyTerminalState(state, to: sessionID)
+            try await applyTerminalState(state, adapter: adapter, to: sessionID)
         }
         if var session = try await sessions.get(id: sessionID), session.status == .running {
             session.status = .stopped
             session.endedAt = Date()
+            session.failureReason = nil
             try await sessions.update(session)
         }
         activeAdapters.removeValue(forKey: sessionID)
+        activeProfiles.removeValue(forKey: sessionID)
         monitorTasks[sessionID]?.cancel()
         monitorTasks.removeValue(forKey: sessionID)
     }
@@ -80,6 +84,7 @@ public actor DefaultRuntimeManager: RuntimeManager {
         session.startedAt = Date()
         session.endedAt = nil
         session.exitCode = nil
+        session.failureReason = nil
         try await sessions.update(session)
         return session
     }
@@ -132,9 +137,19 @@ public actor DefaultRuntimeManager: RuntimeManager {
                 switch state {
                 case .running, .preparing:
                     try? await Task.sleep(for: .milliseconds(300))
-                case .stopped, .failed, .idle:
-                    try? await applyTerminalState(state, to: sessionID)
+                case .failed:
+                    if await restartIfNeeded(sessionID: sessionID, adapter: adapter) {
+                        continue
+                    }
+                    try? await applyTerminalState(state, adapter: adapter, to: sessionID)
                     activeAdapters.removeValue(forKey: sessionID)
+                    activeProfiles.removeValue(forKey: sessionID)
+                    monitorTasks.removeValue(forKey: sessionID)
+                    return
+                case .stopped, .idle:
+                    try? await applyTerminalState(state, adapter: adapter, to: sessionID)
+                    activeAdapters.removeValue(forKey: sessionID)
+                    activeProfiles.removeValue(forKey: sessionID)
                     monitorTasks.removeValue(forKey: sessionID)
                     return
                 }
@@ -142,22 +157,61 @@ public actor DefaultRuntimeManager: RuntimeManager {
         }
     }
 
-    private func applyTerminalState(_ state: RuntimeProcessState, to sessionID: RunSession.ID) async throws {
+    private func restartIfNeeded(sessionID: RunSession.ID, adapter: any RuntimeAdapter) async -> Bool {
+        guard let profile = activeProfiles[sessionID], profile.autoRestart else {
+            return false
+        }
+        guard let existingSession = try? await sessions.get(id: sessionID) else {
+            return false
+        }
+        var session = existingSession
+
+        do {
+            let exitCode = await adapter.lastExitCode()
+            let handle = try await adapter.restart()
+            session.status = .running
+            session.pid = handle.pid
+            session.startedAt = Date()
+            session.endedAt = nil
+            session.exitCode = nil
+            session.restartCount += 1
+            session.failureReason = exitCode.map { "process exited with code \($0); auto-restarted" } ?? "process failed; auto-restarted"
+            try await sessions.update(session)
+            try? await logStore.append(
+                LogEvent(stream: .system, message: "Auto-restarted session after failure"),
+                sessionID: sessionID
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func applyTerminalState(_ state: RuntimeProcessState, adapter: any RuntimeAdapter, to sessionID: RunSession.ID) async throws {
         guard var session = try await sessions.get(id: sessionID) else {
             return
         }
 
+        let exitCode = await adapter.lastExitCode()
+
         switch state {
         case .failed:
             session.status = .failed
+            session.failureReason = exitCode.map { "process exited with code \($0)" } ?? "runtime process failed"
         case .stopped, .idle:
             session.status = .stopped
+            if session.failureReason == "health check timeout" {
+                session.status = .failed
+            }
         case .running, .preparing:
             return
         }
 
         if session.endedAt == nil {
             session.endedAt = Date()
+        }
+        if session.exitCode == nil {
+            session.exitCode = exitCode
         }
         try await sessions.update(session)
     }

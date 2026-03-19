@@ -6,6 +6,7 @@ public protocol ProjectRepository: Sendable {
     func get(id: Project.ID) async throws -> Project?
     func save(_ project: Project) async throws
     func archive(id: Project.ID, at: Date) async throws
+    func delete(id: Project.ID) async throws
 }
 
 public protocol RuntimeProfileRepository: Sendable {

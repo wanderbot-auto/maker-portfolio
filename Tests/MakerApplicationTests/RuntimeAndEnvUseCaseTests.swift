@@ -45,6 +45,75 @@ func listProjectsReturnsRuntimeCounts() async throws {
 }
 
 @Test
+func listProjectsUseCaseFiltersByStatusTagAndQuery() async throws {
+    let projects = ProjectRepositorySpy()
+    let runtimeProfiles = RuntimeProfileRepositorySpy()
+    let sessions = RunSessionRepositorySpy()
+
+    let maker = Project(
+        name: "Maker",
+        localPath: "/tmp/maker",
+        status: .active,
+        tags: ["swift", "cli"],
+        stackSummary: "Swift"
+    )
+    let archive = Project(
+        name: "Archive Tool",
+        localPath: "/tmp/archive-tool",
+        status: .archived,
+        tags: ["rust"],
+        stackSummary: "Rust"
+    )
+    try await projects.save(maker)
+    try await projects.save(archive)
+
+    let useCase = ListProjectsUseCase(
+        projects: projects,
+        runtimeProfiles: runtimeProfiles,
+        sessions: sessions
+    )
+
+    let active = try await useCase.execute(status: .active)
+    let tagged = try await useCase.execute(tag: "rust")
+    let queried = try await useCase.execute(query: "maker")
+
+    #expect(active.map(\.project.id) == [maker.id])
+    #expect(tagged.map(\.project.id) == [archive.id])
+    #expect(queried.map(\.project.id) == [maker.id])
+}
+
+@Test
+func deleteProjectUseCaseRemovesProject() async throws {
+    let projects = ProjectRepositorySpy()
+    let project = Project(name: "Maker", localPath: "/tmp/maker", status: .active)
+    try await projects.save(project)
+
+    try await DeleteProjectUseCase(projects: projects).execute(projectID: project.id)
+
+    let loaded = try await projects.get(id: project.id)
+    #expect(loaded == nil)
+}
+
+@Test
+func importProjectsUseCaseImportsNewPathsAndSkipsExistingOnes() async throws {
+    let projects = ProjectRepositorySpy()
+    let runtimeProfiles = RuntimeProfileRepositorySpy()
+    let existing = Project(name: "Existing", localPath: "/tmp/existing")
+    try await projects.save(existing)
+
+    let result = try await ImportProjectsUseCase(
+        projects: projects,
+        scanner: ProjectScannerWithProfilesStub(),
+        runtimeProfiles: runtimeProfiles
+    ).execute(paths: ["/tmp/existing", "/tmp/new-a", "/tmp/new-b"], tags: ["imported"], status: .active, priority: .p1)
+
+    #expect(result.imported.count == 2)
+    #expect(result.skippedPaths == ["/tmp/existing"])
+    #expect(result.imported.allSatisfy { $0.project.status == .active && $0.project.priority == .p1 })
+    #expect(result.imported.allSatisfy { $0.project.tags == ["imported"] })
+}
+
+@Test
 func projectDetailUseCaseLoadsRelatedResources() async throws {
     let projects = ProjectRepositorySpy()
     let runtimeProfiles = RuntimeProfileRepositorySpy()
@@ -176,6 +245,47 @@ func rescanProjectUseCaseRefreshesMetadataAndAddsMissingProfiles() async throws 
     #expect(result.createdProfiles.count == 1)
     #expect(profiles.count == 2)
     #expect(profiles.map(\.name).sorted() == ["api", "web"])
+}
+
+@Test
+func startRuntimeUseCaseStartsDependenciesBeforeTargetAndWaitsForHealth() async throws {
+    let projects = ProjectRepositorySpy()
+    let runtimeProfiles = RuntimeProfileRepositorySpy()
+    let sessions = RunSessionRepositoryWithRecordSpy()
+    let project = Project(name: "Maker", localPath: "/tmp/maker", status: .active)
+    let dependency = RuntimeProfile(projectID: project.id, name: "api", entryCommand: "swift", workingDir: "/tmp/maker")
+    let target = RuntimeProfile(
+        projectID: project.id,
+        name: "web",
+        entryCommand: "npm",
+        workingDir: "/tmp/maker",
+        healthCheckType: .http,
+        healthCheckTarget: "http://localhost:3000/health",
+        dependsOn: [dependency.id]
+    )
+    try await projects.save(project)
+    try await runtimeProfiles.save(dependency)
+    try await runtimeProfiles.save(target)
+
+    let runtimeManager = RuntimeManagerRecordingSpy(sessionStore: sessions)
+    let healthChecks = SequencedHealthCheckRunner(results: [
+        HealthCheckResult(status: .failing, detail: "booting"),
+        HealthCheckResult(status: .passing, detail: "ready")
+    ])
+
+    let session = try await StartRuntimeUseCase(
+        projects: projects,
+        runtimeProfiles: runtimeProfiles,
+        runtimeManager: runtimeManager,
+        sessions: sessions,
+        healthChecks: healthChecks
+    ).execute(projectID: project.id, runtimeProfileID: target.id)
+
+    let startOrder = await runtimeManager.startedProfileIDs()
+    let storedSession = try await sessions.get(id: session.id)
+    #expect(startOrder == [dependency.id, target.id])
+    #expect(storedSession?.lastHealthCheckStatus == .passing)
+    #expect(storedSession?.lastHealthCheckDetail == "ready")
 }
 
 @Test
@@ -387,7 +497,8 @@ func restartRuntimeUseCaseFallsBackToStoredSessionProjectAndProfile() async thro
         runtimeManager: runtimeManager,
         projects: projects,
         runtimeProfiles: profiles,
-        sessions: sessions
+        sessions: sessions,
+        healthChecks: HealthCheckRunnerSpy()
     ).execute(sessionID: previousSession.id)
 
     #expect(session.id == restarted.id)
@@ -684,6 +795,7 @@ actor RestartProjectRepositorySpy: ProjectRepository {
     func get(id: Project.ID) async throws -> Project? { id == project.id ? project : nil }
     func save(_ project: Project) async throws {}
     func archive(id: Project.ID, at: Date) async throws {}
+    func delete(id: Project.ID) async throws {}
 }
 
 struct RuntimeLogReaderSpy: RuntimeLogReader {
@@ -704,6 +816,68 @@ struct ProcessInspectorSpy: ProcessInspector {
 
     func isProcessRunning(pid: Int32) async -> Bool {
         runningPIDs.contains(pid)
+    }
+}
+
+struct HealthCheckRunnerSpy: HealthCheckRunner {
+    func evaluate(profile: RuntimeProfile, session: RunSession) async -> HealthCheckResult {
+        HealthCheckResult(status: .passing, detail: "ok")
+    }
+}
+
+actor SequencedHealthCheckRunner: HealthCheckRunner {
+    private var results: [HealthCheckResult]
+
+    init(results: [HealthCheckResult]) {
+        self.results = results
+    }
+
+    func evaluate(profile: RuntimeProfile, session: RunSession) async -> HealthCheckResult {
+        if results.count > 1 {
+            return results.removeFirst()
+        }
+        return results.first ?? HealthCheckResult(status: .passing, detail: "ok")
+    }
+}
+
+actor RuntimeManagerRecordingSpy: RuntimeManager {
+    private let sessionStore: RunSessionRepositoryWithRecordSpy
+    private var startedProfiles: [RuntimeProfile.ID] = []
+
+    init(sessionStore: RunSessionRepositoryWithRecordSpy) {
+        self.sessionStore = sessionStore
+    }
+
+    func startedProfileIDs() -> [RuntimeProfile.ID] {
+        startedProfiles
+    }
+
+    func start(project: Project, profile: RuntimeProfile) async throws -> RunSession {
+        startedProfiles.append(profile.id)
+        let session = RunSession(
+            projectID: project.id,
+            runtimeProfileID: profile.id,
+            status: .running,
+            pid: Int32(startedProfiles.count)
+        )
+        try await sessionStore.save(session)
+        return session
+    }
+
+    func stop(sessionID: RunSession.ID) async throws {}
+
+    func restart(sessionID: RunSession.ID) async throws -> RunSession {
+        throw MakerError.missingResource("not implemented")
+    }
+
+    func status(sessionID: RunSession.ID) async throws -> RunSessionStatus {
+        .running
+    }
+
+    nonisolated func logs(sessionID: RunSession.ID) -> AsyncThrowingStream<MakerSupport.LogEvent, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.finish()
+        }
     }
 }
 

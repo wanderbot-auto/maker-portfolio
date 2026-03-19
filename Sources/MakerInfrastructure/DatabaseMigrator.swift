@@ -110,6 +110,19 @@ public struct DatabaseMigrator {
 
             PRAGMA user_version = 2;
             """)
+            version = 2
+        }
+
+        if version < 3 {
+            try database.executeScript("""
+            ALTER TABLE run_sessions ADD COLUMN restart_count INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE run_sessions ADD COLUMN failure_reason TEXT;
+            ALTER TABLE run_sessions ADD COLUMN last_health_check_status TEXT;
+            ALTER TABLE run_sessions ADD COLUMN last_health_check_detail TEXT;
+            ALTER TABLE run_sessions ADD COLUMN last_health_check_at REAL;
+
+            PRAGMA user_version = 3;
+            """)
         }
     }
 }
