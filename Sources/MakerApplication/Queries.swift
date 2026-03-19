@@ -1,7 +1,7 @@
 import Foundation
 import MakerDomain
 
-public struct ProjectListItem: Sendable, Equatable {
+public struct ProjectListItem: Sendable, Equatable, Codable {
     public var project: Project
     public var runtimeCount: Int
     public var latestSession: RunSession?
@@ -13,7 +13,32 @@ public struct ProjectListItem: Sendable, Equatable {
     }
 }
 
-public struct DashboardSummary: Sendable, Equatable {
+public struct ProjectDetailSnapshot: Sendable, Equatable, Codable {
+    public var project: Project
+    public var runtimeProfiles: [RuntimeProfile]
+    public var envSets: [EnvSet]
+    public var recentSessions: [RunSession]
+    public var milestones: [Milestone]
+    public var note: ProjectNote?
+
+    public init(
+        project: Project,
+        runtimeProfiles: [RuntimeProfile],
+        envSets: [EnvSet],
+        recentSessions: [RunSession],
+        milestones: [Milestone],
+        note: ProjectNote?
+    ) {
+        self.project = project
+        self.runtimeProfiles = runtimeProfiles
+        self.envSets = envSets
+        self.recentSessions = recentSessions
+        self.milestones = milestones
+        self.note = note
+    }
+}
+
+public struct DashboardSummary: Sendable, Equatable, Codable {
     public var totalProjects: Int
     public var activeProjects: Int
     public var runningSessions: Int
@@ -27,7 +52,19 @@ public struct DashboardSummary: Sendable, Equatable {
     }
 }
 
-public struct EnvSetSnapshot: Sendable, Equatable {
+public struct ProjectRescanResult: Sendable, Equatable, Codable {
+    public var project: Project
+    public var createdProfiles: [RuntimeProfile]
+    public var scanResult: ProjectScanResult
+
+    public init(project: Project, createdProfiles: [RuntimeProfile], scanResult: ProjectScanResult) {
+        self.project = project
+        self.createdProfiles = createdProfiles
+        self.scanResult = scanResult
+    }
+}
+
+public struct EnvSetSnapshot: Sendable, Equatable, Codable {
     public var envSet: EnvSet
     public var resolvedVariables: [String: String]
 
@@ -37,7 +74,7 @@ public struct EnvSetSnapshot: Sendable, Equatable {
     }
 }
 
-public struct RuntimeSessionSnapshot: Sendable, Equatable {
+public struct RuntimeSessionSnapshot: Sendable, Equatable, Codable {
     public var sessionID: RunSession.ID
     public var projectID: Project.ID
     public var runtimeProfileID: RuntimeProfile.ID
@@ -59,7 +96,7 @@ public struct RuntimeSessionSnapshot: Sendable, Equatable {
     }
 }
 
-public struct RuntimeHistoryItem: Sendable, Equatable {
+public struct RuntimeHistoryItem: Sendable, Equatable, Codable {
     public var sessionID: RunSession.ID
     public var projectID: Project.ID
     public var runtimeProfileID: RuntimeProfile.ID
@@ -103,7 +140,7 @@ public struct RuntimeHistoryItem: Sendable, Equatable {
     }
 }
 
-public struct RuntimeReconcileItem: Sendable, Equatable {
+public struct RuntimeReconcileItem: Sendable, Equatable, Codable {
     public var sessionID: RunSession.ID
     public var projectID: Project.ID
     public var runtimeProfileID: RuntimeProfile.ID
@@ -128,7 +165,32 @@ public struct RuntimeReconcileItem: Sendable, Equatable {
     }
 }
 
-public struct RuntimeLogSnapshot: Sendable, Equatable {
+public struct RuntimeSessionDiagnosticItem: Sendable, Equatable, Codable {
+    public var sessionID: RunSession.ID
+    public var projectID: Project.ID
+    public var runtimeProfileID: RuntimeProfile.ID
+    public var status: RunSessionStatus
+    public var pid: Int32?
+    public var processRunning: Bool
+
+    public init(
+        sessionID: RunSession.ID,
+        projectID: Project.ID,
+        runtimeProfileID: RuntimeProfile.ID,
+        status: RunSessionStatus,
+        pid: Int32?,
+        processRunning: Bool
+    ) {
+        self.sessionID = sessionID
+        self.projectID = projectID
+        self.runtimeProfileID = runtimeProfileID
+        self.status = status
+        self.pid = pid
+        self.processRunning = processRunning
+    }
+}
+
+public struct RuntimeLogSnapshot: Sendable, Equatable, Codable {
     public var sessionID: RunSession.ID
     public var projectID: Project.ID
     public var runtimeProfileID: RuntimeProfile.ID

@@ -86,6 +86,15 @@ public actor InMemoryRunSessionRepository: RunSessionRepository {
         )
     }
 
+    public func listAll(limit: Int, status: RunSessionStatus?) async throws -> [RunSession] {
+        Array(
+            storage.values
+                .filter { status == nil || $0.status == status }
+                .sorted { $0.startedAt > $1.startedAt }
+                .prefix(limit)
+        )
+    }
+
     public func listRunning() async throws -> [RunSession] {
         storage.values
             .filter { $0.status == .running }
@@ -114,8 +123,16 @@ public actor InMemoryMilestoneRepository: MilestoneRepository {
         storage.values.filter { $0.projectID == projectID }.sorted { $0.title < $1.title }
     }
 
+    public func get(id: Milestone.ID) async throws -> Milestone? {
+        storage[id]
+    }
+
     public func save(_ milestone: Milestone) async throws {
         storage[milestone.id] = milestone
+    }
+
+    public func delete(id: Milestone.ID) async throws {
+        storage.removeValue(forKey: id)
     }
 }
 

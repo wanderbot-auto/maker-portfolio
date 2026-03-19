@@ -79,6 +79,192 @@ public struct ListProjectsUseCase: Sendable {
     }
 }
 
+public struct GetProjectDetailUseCase: Sendable {
+    private let projects: any ProjectRepository
+    private let runtimeProfiles: any RuntimeProfileRepository
+    private let envSets: any EnvSetRepository
+    private let sessions: any RunSessionRepository
+    private let milestones: any MilestoneRepository
+    private let notes: any ProjectNoteRepository
+
+    public init(
+        projects: any ProjectRepository,
+        runtimeProfiles: any RuntimeProfileRepository,
+        envSets: any EnvSetRepository,
+        sessions: any RunSessionRepository,
+        milestones: any MilestoneRepository,
+        notes: any ProjectNoteRepository
+    ) {
+        self.projects = projects
+        self.runtimeProfiles = runtimeProfiles
+        self.envSets = envSets
+        self.sessions = sessions
+        self.milestones = milestones
+        self.notes = notes
+    }
+
+    public func execute(projectID: Project.ID, recentSessionLimit: Int = 10) async throws -> ProjectDetailSnapshot? {
+        guard let project = try await projects.get(id: projectID) else {
+            return nil
+        }
+
+        async let runtimeProfilesTask = runtimeProfiles.list(projectID: projectID)
+        async let envSetsTask = envSets.list(projectID: projectID)
+        async let sessionsTask = sessions.list(projectID: projectID, limit: recentSessionLimit)
+        async let milestonesTask = milestones.list(projectID: projectID)
+        async let noteTask = notes.get(projectID: projectID)
+
+        let loadedRuntimeProfiles = try await runtimeProfilesTask
+        let loadedEnvSets = try await envSetsTask
+        let loadedSessions = try await sessionsTask
+        let loadedMilestones = try await milestonesTask
+        let loadedNote = try await noteTask
+
+        return ProjectDetailSnapshot(
+            project: project,
+            runtimeProfiles: loadedRuntimeProfiles,
+            envSets: loadedEnvSets,
+            recentSessions: loadedSessions,
+            milestones: loadedMilestones,
+            note: loadedNote
+        )
+    }
+}
+
+public struct UpdateProjectUseCase: Sendable {
+    private let projects: any ProjectRepository
+
+    public init(projects: any ProjectRepository) {
+        self.projects = projects
+    }
+
+    public func execute(
+        projectID: Project.ID,
+        name: String? = nil,
+        description: String? = nil,
+        status: ProjectStatus? = nil,
+        priority: ProjectPriority? = nil
+    ) async throws -> Project {
+        guard var project = try await projects.get(id: projectID) else {
+            throw MakerError.missingResource("Project \(projectID.uuidString) not found")
+        }
+
+        if let name, !name.isEmpty {
+            project.name = name
+            project.slug = Project.makeSlug(from: name)
+        }
+        if let description {
+            project.description = description
+        }
+        if let status {
+            project.status = status
+            if status == .archived {
+                project.archivedAt = project.archivedAt ?? Date()
+            } else {
+                project.archivedAt = nil
+            }
+        }
+        if let priority {
+            project.priority = priority
+        }
+        project.updatedAt = Date()
+
+        try await projects.save(project)
+        return project
+    }
+}
+
+public struct ArchiveProjectUseCase: Sendable {
+    private let projects: any ProjectRepository
+
+    public init(projects: any ProjectRepository) {
+        self.projects = projects
+    }
+
+    public func execute(projectID: Project.ID) async throws -> Project {
+        try await projects.archive(id: projectID, at: Date())
+        guard let project = try await projects.get(id: projectID) else {
+            throw MakerError.missingResource("Project \(projectID.uuidString) not found")
+        }
+        return project
+    }
+}
+
+public struct UnarchiveProjectUseCase: Sendable {
+    private let projects: any ProjectRepository
+
+    public init(projects: any ProjectRepository) {
+        self.projects = projects
+    }
+
+    public func execute(projectID: Project.ID, restoredStatus: ProjectStatus = .active) async throws -> Project {
+        guard var project = try await projects.get(id: projectID) else {
+            throw MakerError.missingResource("Project \(projectID.uuidString) not found")
+        }
+
+        project.status = restoredStatus
+        project.archivedAt = nil
+        project.updatedAt = Date()
+        try await projects.save(project)
+        return project
+    }
+}
+
+public struct RescanProjectUseCase: Sendable {
+    private let projects: any ProjectRepository
+    private let runtimeProfiles: any RuntimeProfileRepository
+    private let scanner: any ProjectScanner
+
+    public init(
+        projects: any ProjectRepository,
+        runtimeProfiles: any RuntimeProfileRepository,
+        scanner: any ProjectScanner
+    ) {
+        self.projects = projects
+        self.runtimeProfiles = runtimeProfiles
+        self.scanner = scanner
+    }
+
+    public func execute(projectID: Project.ID) async throws -> ProjectRescanResult {
+        guard var project = try await projects.get(id: projectID) else {
+            throw MakerError.missingResource("Project \(projectID.uuidString) not found")
+        }
+
+        let scanResult = try await scanner.scan(at: project.localPath)
+        project.repoType = scanResult.repoType
+        project.stackSummary = scanResult.stackSummary
+        project.updatedAt = Date()
+        try await projects.save(project)
+
+        let existingProfiles = try await runtimeProfiles.list(projectID: projectID)
+        var createdProfiles: [RuntimeProfile] = []
+
+        for discovered in scanResult.discoveredProfiles {
+            let alreadyExists = existingProfiles.contains {
+                $0.name == discovered.name &&
+                    $0.entryCommand == discovered.entryCommand &&
+                    $0.workingDir == discovered.workingDir &&
+                    $0.args == discovered.args
+            }
+            guard alreadyExists == false else {
+                continue
+            }
+
+            let profile = RuntimeProfile(
+                projectID: projectID,
+                name: discovered.name,
+                entryCommand: discovered.entryCommand,
+                workingDir: discovered.workingDir,
+                args: discovered.args
+            )
+            try await runtimeProfiles.save(profile)
+            createdProfiles.append(profile)
+        }
+
+        return ProjectRescanResult(project: project, createdProfiles: createdProfiles, scanResult: scanResult)
+    }
+}
+
 public struct ListRuntimeProfilesUseCase: Sendable {
     private let runtimeProfiles: any RuntimeProfileRepository
 
@@ -88,6 +274,233 @@ public struct ListRuntimeProfilesUseCase: Sendable {
 
     public func execute(projectID: Project.ID) async throws -> [RuntimeProfile] {
         try await runtimeProfiles.list(projectID: projectID)
+    }
+}
+
+public struct GetRuntimeProfileUseCase: Sendable {
+    private let runtimeProfiles: any RuntimeProfileRepository
+
+    public init(runtimeProfiles: any RuntimeProfileRepository) {
+        self.runtimeProfiles = runtimeProfiles
+    }
+
+    public func execute(profileID: RuntimeProfile.ID) async throws -> RuntimeProfile? {
+        try await runtimeProfiles.get(id: profileID)
+    }
+}
+
+public struct CreateRuntimeProfileUseCase: Sendable {
+    private let runtimeProfiles: any RuntimeProfileRepository
+
+    public init(runtimeProfiles: any RuntimeProfileRepository) {
+        self.runtimeProfiles = runtimeProfiles
+    }
+
+    public func execute(
+        projectID: Project.ID,
+        name: String,
+        entryCommand: String,
+        workingDir: String,
+        args: [String] = []
+    ) async throws -> RuntimeProfile {
+        let profile = RuntimeProfile(
+            projectID: projectID,
+            name: name,
+            entryCommand: entryCommand,
+            workingDir: workingDir,
+            args: args
+        )
+        try await runtimeProfiles.save(profile)
+        return profile
+    }
+}
+
+public struct UpdateRuntimeProfileUseCase: Sendable {
+    private let runtimeProfiles: any RuntimeProfileRepository
+
+    public init(runtimeProfiles: any RuntimeProfileRepository) {
+        self.runtimeProfiles = runtimeProfiles
+    }
+
+    public func execute(
+        profileID: RuntimeProfile.ID,
+        name: String? = nil,
+        entryCommand: String? = nil,
+        workingDir: String? = nil,
+        args: [String]? = nil
+    ) async throws -> RuntimeProfile {
+        guard var profile = try await runtimeProfiles.get(id: profileID) else {
+            throw MakerError.missingResource("Runtime profile \(profileID.uuidString) not found")
+        }
+
+        if let name, !name.isEmpty {
+            profile.name = name
+        }
+        if let entryCommand, !entryCommand.isEmpty {
+            profile.entryCommand = entryCommand
+        }
+        if let workingDir, !workingDir.isEmpty {
+            profile.workingDir = workingDir
+        }
+        if let args {
+            profile.args = args
+        }
+
+        try await runtimeProfiles.save(profile)
+        return profile
+    }
+}
+
+public struct DeleteRuntimeProfileUseCase: Sendable {
+    private let runtimeProfiles: any RuntimeProfileRepository
+
+    public init(runtimeProfiles: any RuntimeProfileRepository) {
+        self.runtimeProfiles = runtimeProfiles
+    }
+
+    public func execute(profileID: RuntimeProfile.ID) async throws {
+        try await runtimeProfiles.delete(id: profileID)
+    }
+}
+
+public struct AttachEnvSetToRuntimeProfileUseCase: Sendable {
+    private let runtimeProfiles: any RuntimeProfileRepository
+    private let envSets: any EnvSetRepository
+
+    public init(runtimeProfiles: any RuntimeProfileRepository, envSets: any EnvSetRepository) {
+        self.runtimeProfiles = runtimeProfiles
+        self.envSets = envSets
+    }
+
+    public func execute(profileID: RuntimeProfile.ID, envSetID: EnvSet.ID) async throws -> RuntimeProfile {
+        guard var profile = try await runtimeProfiles.get(id: profileID) else {
+            throw MakerError.missingResource("Runtime profile \(profileID.uuidString) not found")
+        }
+        guard let envSet = try await envSets.get(id: envSetID) else {
+            throw MakerError.missingResource("Env set \(envSetID.uuidString) not found")
+        }
+        guard envSet.projectID == profile.projectID else {
+            throw MakerError.invalidConfiguration("Env set and runtime profile must belong to the same project.")
+        }
+
+        profile.envSetID = envSetID
+        try await runtimeProfiles.save(profile)
+        return profile
+    }
+}
+
+public struct DetachEnvSetFromRuntimeProfileUseCase: Sendable {
+    private let runtimeProfiles: any RuntimeProfileRepository
+
+    public init(runtimeProfiles: any RuntimeProfileRepository) {
+        self.runtimeProfiles = runtimeProfiles
+    }
+
+    public func execute(profileID: RuntimeProfile.ID) async throws -> RuntimeProfile {
+        guard var profile = try await runtimeProfiles.get(id: profileID) else {
+            throw MakerError.missingResource("Runtime profile \(profileID.uuidString) not found")
+        }
+
+        profile.envSetID = nil
+        try await runtimeProfiles.save(profile)
+        return profile
+    }
+}
+
+public struct AddRuntimeProfileDependencyUseCase: Sendable {
+    private let runtimeProfiles: any RuntimeProfileRepository
+
+    public init(runtimeProfiles: any RuntimeProfileRepository) {
+        self.runtimeProfiles = runtimeProfiles
+    }
+
+    public func execute(profileID: RuntimeProfile.ID, dependsOnProfileID: RuntimeProfile.ID) async throws -> RuntimeProfile {
+        guard var profile = try await runtimeProfiles.get(id: profileID) else {
+            throw MakerError.missingResource("Runtime profile \(profileID.uuidString) not found")
+        }
+        guard let dependency = try await runtimeProfiles.get(id: dependsOnProfileID) else {
+            throw MakerError.missingResource("Runtime profile \(dependsOnProfileID.uuidString) not found")
+        }
+        guard profile.id != dependency.id else {
+            throw MakerError.invalidConfiguration("Runtime profile cannot depend on itself.")
+        }
+        guard profile.projectID == dependency.projectID else {
+            throw MakerError.invalidConfiguration("Dependencies must belong to the same project.")
+        }
+
+        if profile.dependsOn.contains(dependsOnProfileID) == false {
+            profile.dependsOn.append(dependsOnProfileID)
+            try await runtimeProfiles.save(profile)
+        }
+        return profile
+    }
+}
+
+public struct RemoveRuntimeProfileDependencyUseCase: Sendable {
+    private let runtimeProfiles: any RuntimeProfileRepository
+
+    public init(runtimeProfiles: any RuntimeProfileRepository) {
+        self.runtimeProfiles = runtimeProfiles
+    }
+
+    public func execute(profileID: RuntimeProfile.ID, dependsOnProfileID: RuntimeProfile.ID) async throws -> RuntimeProfile {
+        guard var profile = try await runtimeProfiles.get(id: profileID) else {
+            throw MakerError.missingResource("Runtime profile \(profileID.uuidString) not found")
+        }
+
+        profile.dependsOn.removeAll { $0 == dependsOnProfileID }
+        try await runtimeProfiles.save(profile)
+        return profile
+    }
+}
+
+public struct SetRuntimeProfileHealthCheckUseCase: Sendable {
+    private let runtimeProfiles: any RuntimeProfileRepository
+
+    public init(runtimeProfiles: any RuntimeProfileRepository) {
+        self.runtimeProfiles = runtimeProfiles
+    }
+
+    public func execute(
+        profileID: RuntimeProfile.ID,
+        type: HealthCheckType,
+        target: String?
+    ) async throws -> RuntimeProfile {
+        guard var profile = try await runtimeProfiles.get(id: profileID) else {
+            throw MakerError.missingResource("Runtime profile \(profileID.uuidString) not found")
+        }
+
+        if type == .none {
+            profile.healthCheckType = .none
+            profile.healthCheckTarget = nil
+        } else {
+            guard let target, !target.isEmpty else {
+                throw MakerError.invalidConfiguration("Health check target is required for \(type.rawValue).")
+            }
+            profile.healthCheckType = type
+            profile.healthCheckTarget = target
+        }
+
+        try await runtimeProfiles.save(profile)
+        return profile
+    }
+}
+
+public struct SetRuntimeProfileAutoRestartUseCase: Sendable {
+    private let runtimeProfiles: any RuntimeProfileRepository
+
+    public init(runtimeProfiles: any RuntimeProfileRepository) {
+        self.runtimeProfiles = runtimeProfiles
+    }
+
+    public func execute(profileID: RuntimeProfile.ID, enabled: Bool) async throws -> RuntimeProfile {
+        guard var profile = try await runtimeProfiles.get(id: profileID) else {
+            throw MakerError.missingResource("Runtime profile \(profileID.uuidString) not found")
+        }
+
+        profile.autoRestart = enabled
+        try await runtimeProfiles.save(profile)
+        return profile
     }
 }
 
@@ -204,6 +617,30 @@ public struct RuntimeHistoryUseCase: Sendable {
     }
 }
 
+public struct ListRuntimeSessionsUseCase: Sendable {
+    private let sessions: any RunSessionRepository
+
+    public init(sessions: any RunSessionRepository) {
+        self.sessions = sessions
+    }
+
+    public func execute(
+        projectID: Project.ID? = nil,
+        status: RunSessionStatus? = nil,
+        limit: Int = 20
+    ) async throws -> [RunSession] {
+        let safeLimit = max(1, limit)
+        if let projectID {
+            let projectSessions = try await sessions.list(projectID: projectID, limit: safeLimit)
+            if let status {
+                return projectSessions.filter { $0.status == status }
+            }
+            return projectSessions
+        }
+        return try await sessions.listAll(limit: safeLimit, status: status)
+    }
+}
+
 public struct ReconcileRuntimeSessionsUseCase: Sendable {
     private let sessions: any RunSessionRepository
     private let processInspector: any ProcessInspector
@@ -252,6 +689,43 @@ public struct ReconcileRuntimeSessionsUseCase: Sendable {
         }
 
         return reconciled
+    }
+}
+
+public struct DiagnoseRuntimeSessionsUseCase: Sendable {
+    private let sessions: any RunSessionRepository
+    private let processInspector: any ProcessInspector
+
+    public init(sessions: any RunSessionRepository, processInspector: any ProcessInspector) {
+        self.sessions = sessions
+        self.processInspector = processInspector
+    }
+
+    public func execute() async throws -> [RuntimeSessionDiagnosticItem] {
+        let runningSessions = try await sessions.listRunning()
+        var items: [RuntimeSessionDiagnosticItem] = []
+
+        for session in runningSessions {
+            let processRunning: Bool
+            if let pid = session.pid {
+                processRunning = await processInspector.isProcessRunning(pid: pid)
+            } else {
+                processRunning = false
+            }
+
+            items.append(
+                RuntimeSessionDiagnosticItem(
+                    sessionID: session.id,
+                    projectID: session.projectID,
+                    runtimeProfileID: session.runtimeProfileID,
+                    status: session.status,
+                    pid: session.pid,
+                    processRunning: processRunning
+                )
+            )
+        }
+
+        return items
     }
 }
 
@@ -320,6 +794,119 @@ public struct UpsertEnvSetUseCase: Sendable {
     }
 }
 
+public struct ListEnvSetsUseCase: Sendable {
+    private let envSets: any EnvSetRepository
+    private let secrets: any SecretsStore
+
+    public init(envSets: any EnvSetRepository, secrets: any SecretsStore) {
+        self.envSets = envSets
+        self.secrets = secrets
+    }
+
+    public func execute(projectID: Project.ID) async throws -> [EnvSetSnapshot] {
+        let sets = try await envSets.list(projectID: projectID)
+        var snapshots: [EnvSetSnapshot] = []
+
+        for envSet in sets {
+            let variables: [String: String]
+            if envSet.isEncrypted {
+                variables = try await secrets.load(for: envSet.id)
+            } else {
+                variables = envSet.variables
+            }
+            snapshots.append(EnvSetSnapshot(envSet: envSet, resolvedVariables: variables))
+        }
+
+        return snapshots
+    }
+}
+
+public struct DeleteEnvSetUseCase: Sendable {
+    private let envSets: any EnvSetRepository
+    private let secrets: any SecretsStore
+
+    public init(envSets: any EnvSetRepository, secrets: any SecretsStore) {
+        self.envSets = envSets
+        self.secrets = secrets
+    }
+
+    public func execute(projectID: Project.ID, name: String) async throws -> EnvSet? {
+        guard let envSet = try await envSets.list(projectID: projectID).first(where: { $0.name == name }) else {
+            return nil
+        }
+
+        try await envSets.delete(id: envSet.id)
+        try await secrets.delete(for: envSet.id)
+        return envSet
+    }
+}
+
+public struct UnsetEnvVariablesUseCase: Sendable {
+    private let envSets: any EnvSetRepository
+    private let secrets: any SecretsStore
+
+    public init(envSets: any EnvSetRepository, secrets: any SecretsStore) {
+        self.envSets = envSets
+        self.secrets = secrets
+    }
+
+    public func execute(projectID: Project.ID, name: String, keys: [String]) async throws -> EnvSetSnapshot? {
+        guard var envSet = try await envSets.list(projectID: projectID).first(where: { $0.name == name }) else {
+            return nil
+        }
+
+        let normalizedKeys = Set(keys)
+        var values = envSet.isEncrypted ? try await secrets.load(for: envSet.id) : envSet.variables
+        for key in normalizedKeys {
+            values.removeValue(forKey: key)
+        }
+
+        if envSet.isEncrypted {
+            if values.isEmpty {
+                try await secrets.delete(for: envSet.id)
+            } else {
+                try await secrets.save(values: values, for: envSet.id)
+            }
+        } else {
+            envSet.variables = values
+            try await envSets.save(envSet)
+        }
+
+        return EnvSetSnapshot(envSet: envSet, resolvedVariables: values)
+    }
+}
+
+public struct CopyEnvSetUseCase: Sendable {
+    private let envSets: any EnvSetRepository
+    private let secrets: any SecretsStore
+
+    public init(envSets: any EnvSetRepository, secrets: any SecretsStore) {
+        self.envSets = envSets
+        self.secrets = secrets
+    }
+
+    public func execute(projectID: Project.ID, sourceName: String, targetName: String) async throws -> EnvSetSnapshot? {
+        guard let source = try await envSets.list(projectID: projectID).first(where: { $0.name == sourceName }) else {
+            return nil
+        }
+
+        let variables: [String: String]
+        if source.isEncrypted {
+            variables = try await secrets.load(for: source.id)
+        } else {
+            variables = source.variables
+        }
+
+        let copied = try await UpsertEnvSetUseCase(envSets: envSets, secrets: secrets).execute(
+            projectID: projectID,
+            name: targetName,
+            variables: variables,
+            encrypted: source.isEncrypted
+        )
+        return EnvSetSnapshot(envSet: copied, resolvedVariables: variables)
+    }
+}
+
 public struct LoadEnvSetUseCase: Sendable {
     private let envSets: any EnvSetRepository
     private let secrets: any SecretsStore
@@ -342,6 +929,135 @@ public struct LoadEnvSetUseCase: Sendable {
         }
 
         return EnvSetSnapshot(envSet: envSet, resolvedVariables: variables)
+    }
+}
+
+public struct ListMilestonesUseCase: Sendable {
+    private let projects: any ProjectRepository
+    private let milestones: any MilestoneRepository
+
+    public init(projects: any ProjectRepository, milestones: any MilestoneRepository) {
+        self.projects = projects
+        self.milestones = milestones
+    }
+
+    public func execute(projectID: Project.ID) async throws -> [Milestone] {
+        guard try await projects.get(id: projectID) != nil else {
+            throw MakerError.missingResource("Project \(projectID.uuidString) not found")
+        }
+        return try await milestones.list(projectID: projectID)
+    }
+}
+
+public struct CreateMilestoneUseCase: Sendable {
+    private let projects: any ProjectRepository
+    private let milestones: any MilestoneRepository
+
+    public init(projects: any ProjectRepository, milestones: any MilestoneRepository) {
+        self.projects = projects
+        self.milestones = milestones
+    }
+
+    public func execute(projectID: Project.ID, title: String, dueDate: Date? = nil) async throws -> Milestone {
+        guard try await projects.get(id: projectID) != nil else {
+            throw MakerError.missingResource("Project \(projectID.uuidString) not found")
+        }
+
+        let milestone = Milestone(projectID: projectID, title: title, dueDate: dueDate)
+        try await milestones.save(milestone)
+        return milestone
+    }
+}
+
+public struct UpdateMilestoneStateUseCase: Sendable {
+    private let milestones: any MilestoneRepository
+
+    public init(milestones: any MilestoneRepository) {
+        self.milestones = milestones
+    }
+
+    public func execute(milestoneID: Milestone.ID, state: Milestone.State) async throws -> Milestone {
+        guard var milestone = try await milestones.get(id: milestoneID) else {
+            throw MakerError.missingResource("Milestone \(milestoneID.uuidString) not found")
+        }
+
+        milestone.state = state
+        try await milestones.save(milestone)
+        return milestone
+    }
+}
+
+public struct UpdateMilestoneUseCase: Sendable {
+    private let milestones: any MilestoneRepository
+
+    public init(milestones: any MilestoneRepository) {
+        self.milestones = milestones
+    }
+
+    public func execute(
+        milestoneID: Milestone.ID,
+        title: String? = nil,
+        dueDate: Date?? = nil
+    ) async throws -> Milestone {
+        guard var milestone = try await milestones.get(id: milestoneID) else {
+            throw MakerError.missingResource("Milestone \(milestoneID.uuidString) not found")
+        }
+
+        if let title {
+            milestone.title = title
+        }
+        if let dueDate {
+            milestone.dueDate = dueDate
+        }
+
+        try await milestones.save(milestone)
+        return milestone
+    }
+}
+
+public struct DeleteMilestoneUseCase: Sendable {
+    private let milestones: any MilestoneRepository
+
+    public init(milestones: any MilestoneRepository) {
+        self.milestones = milestones
+    }
+
+    public func execute(milestoneID: Milestone.ID) async throws {
+        guard try await milestones.get(id: milestoneID) != nil else {
+            throw MakerError.missingResource("Milestone \(milestoneID.uuidString) not found")
+        }
+        try await milestones.delete(id: milestoneID)
+    }
+}
+
+public struct LoadProjectNoteUseCase: Sendable {
+    private let notes: any ProjectNoteRepository
+
+    public init(notes: any ProjectNoteRepository) {
+        self.notes = notes
+    }
+
+    public func execute(projectID: Project.ID) async throws -> ProjectNote? {
+        try await notes.get(projectID: projectID)
+    }
+}
+
+public struct SaveProjectNoteUseCase: Sendable {
+    private let notes: any ProjectNoteRepository
+
+    public init(notes: any ProjectNoteRepository) {
+        self.notes = notes
+    }
+
+    public func execute(projectID: Project.ID, content: String) async throws -> ProjectNote {
+        let note = ProjectNote(
+            id: (try await notes.get(projectID: projectID))?.id ?? UUID(),
+            projectID: projectID,
+            content: content,
+            updatedAt: Date()
+        )
+        try await notes.save(note)
+        return note
     }
 }
 

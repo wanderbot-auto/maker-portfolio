@@ -282,6 +282,23 @@ public actor SQLiteRunSessionRepository: RunSessionRepository {
         return try rows.map(decodeSession)
     }
 
+    public func listAll(limit: Int, status: RunSessionStatus?) async throws -> [RunSession] {
+        let safeLimit = max(1, limit)
+        let rows: [SQLiteRow]
+        if let status {
+            rows = try database.query(
+                "SELECT * FROM run_sessions WHERE status = ? ORDER BY started_at DESC LIMIT ?;",
+                bindings: [.text(status.rawValue), .integer(Int64(safeLimit))]
+            )
+        } else {
+            rows = try database.query(
+                "SELECT * FROM run_sessions ORDER BY started_at DESC LIMIT ?;",
+                bindings: [.integer(Int64(safeLimit))]
+            )
+        }
+        return try rows.map(decodeSession)
+    }
+
     public func listRunning() async throws -> [RunSession] {
         let rows = try database.query(
             "SELECT * FROM run_sessions WHERE status = ? ORDER BY started_at DESC;",
@@ -363,6 +380,14 @@ public actor SQLiteMilestoneRepository: MilestoneRepository {
         return try rows.map(decodeMilestone)
     }
 
+    public func get(id: Milestone.ID) async throws -> Milestone? {
+        let rows = try database.query(
+            "SELECT * FROM milestones WHERE id = ? LIMIT 1;",
+            bindings: [.text(id.uuidString)]
+        )
+        return try rows.first.map(decodeMilestone)
+    }
+
     public func save(_ milestone: Milestone) async throws {
         try database.execute(
             """
@@ -381,6 +406,13 @@ public actor SQLiteMilestoneRepository: MilestoneRepository {
                 milestone.dueDate.map { .real($0.timeIntervalSince1970) } ?? .null,
                 .text(milestone.state.rawValue)
             ]
+        )
+    }
+
+    public func delete(id: Milestone.ID) async throws {
+        try database.execute(
+            "DELETE FROM milestones WHERE id = ?;",
+            bindings: [.text(id.uuidString)]
         )
     }
 

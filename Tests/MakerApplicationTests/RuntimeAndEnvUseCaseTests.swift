@@ -45,6 +45,140 @@ func listProjectsReturnsRuntimeCounts() async throws {
 }
 
 @Test
+func projectDetailUseCaseLoadsRelatedResources() async throws {
+    let projects = ProjectRepositorySpy()
+    let runtimeProfiles = RuntimeProfileRepositorySpy()
+    let envSets = EnvSetRepositorySpy()
+    let sessions = RunSessionRepositoryWithRecordSpy()
+    let milestones = MilestoneRepositorySpy()
+    let notes = ProjectNoteRepositorySpy()
+
+    let project = Project(name: "Maker", localPath: "/tmp/maker", status: .active)
+    try await projects.save(project)
+    try await runtimeProfiles.save(RuntimeProfile(projectID: project.id, name: "web", entryCommand: "npm", workingDir: "/tmp/maker"))
+    try await envSets.save(EnvSet(projectID: project.id, name: "local", variables: ["BASE_URL": "http://localhost"], isEncrypted: false))
+    try await sessions.save(RunSession(projectID: project.id, runtimeProfileID: UUID(), status: .running, pid: 7))
+    try await milestones.save(Milestone(projectID: project.id, title: "Ship"))
+    try await notes.save(ProjectNote(projectID: project.id, content: "Focus on CLI"))
+
+    let snapshot = try await GetProjectDetailUseCase(
+        projects: projects,
+        runtimeProfiles: runtimeProfiles,
+        envSets: envSets,
+        sessions: sessions,
+        milestones: milestones,
+        notes: notes
+    ).execute(projectID: project.id)
+
+    #expect(snapshot?.project.id == project.id)
+    #expect(snapshot?.runtimeProfiles.count == 1)
+    #expect(snapshot?.envSets.count == 1)
+    #expect(snapshot?.recentSessions.count == 1)
+    #expect(snapshot?.milestones.count == 1)
+    #expect(snapshot?.note?.content == "Focus on CLI")
+}
+
+@Test
+func updateAndArchiveProjectUseCasesPersistChanges() async throws {
+    let projects = ProjectRepositorySpy()
+    let project = Project(name: "Maker", localPath: "/tmp/maker", status: .idea, priority: .p2)
+    try await projects.save(project)
+
+    let updated = try await UpdateProjectUseCase(projects: projects).execute(
+        projectID: project.id,
+        name: "Maker Core",
+        description: "Stable local orchestrator",
+        status: .active,
+        priority: .p1
+    )
+    let archived = try await ArchiveProjectUseCase(projects: projects).execute(projectID: project.id)
+    let restored = try await UnarchiveProjectUseCase(projects: projects).execute(projectID: project.id)
+
+    #expect(updated.name == "Maker Core")
+    #expect(updated.priority == .p1)
+    #expect(archived.status == .archived)
+    #expect(archived.archivedAt != nil)
+    #expect(restored.status == .active)
+    #expect(restored.archivedAt == nil)
+}
+
+@Test
+func milestoneUseCasesCreateListAndUpdateState() async throws {
+    let projects = ProjectRepositorySpy()
+    let milestones = MilestoneRepositorySpy()
+    let project = Project(name: "Maker", localPath: "/tmp/maker", status: .active)
+    try await projects.save(project)
+
+    let created = try await CreateMilestoneUseCase(
+        projects: projects,
+        milestones: milestones
+    ).execute(projectID: project.id, title: "Ship CLI", dueDate: Date(timeIntervalSince1970: 1_700_000_000))
+
+    let listed = try await ListMilestonesUseCase(
+        projects: projects,
+        milestones: milestones
+    ).execute(projectID: project.id)
+
+    let updated = try await UpdateMilestoneStateUseCase(
+        milestones: milestones
+    ).execute(milestoneID: created.id, state: .completed)
+
+    #expect(listed.count == 1)
+    #expect(listed.first?.title == "Ship CLI")
+    #expect(listed.first?.dueDate == Date(timeIntervalSince1970: 1_700_000_000))
+    #expect(updated.state == .completed)
+}
+
+@Test
+func milestoneEditAndDeleteUseCasesPersistChanges() async throws {
+    let milestones = MilestoneRepositorySpy()
+    let milestone = Milestone(
+        projectID: UUID(),
+        title: "Ship CLI",
+        dueDate: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+    try await milestones.save(milestone)
+
+    let edited = try await UpdateMilestoneUseCase(
+        milestones: milestones
+    ).execute(
+        milestoneID: milestone.id,
+        title: "Ship CLI v2",
+        dueDate: .some(nil)
+    )
+
+    #expect(edited.title == "Ship CLI v2")
+    #expect(edited.dueDate == nil)
+
+    try await DeleteMilestoneUseCase(milestones: milestones).execute(milestoneID: milestone.id)
+
+    let loaded = try await milestones.get(id: milestone.id)
+    #expect(loaded == nil)
+}
+
+@Test
+func rescanProjectUseCaseRefreshesMetadataAndAddsMissingProfiles() async throws {
+    let projects = ProjectRepositorySpy()
+    let runtimeProfiles = RuntimeProfileRepositorySpy()
+    let project = Project(name: "Maker", localPath: "/tmp/maker", repoType: .localOnly, stackSummary: "Unknown")
+    try await projects.save(project)
+    try await runtimeProfiles.save(RuntimeProfile(projectID: project.id, name: "web", entryCommand: "npm", workingDir: "/tmp/maker", args: ["run", "dev"]))
+
+    let result = try await RescanProjectUseCase(
+        projects: projects,
+        runtimeProfiles: runtimeProfiles,
+        scanner: ProjectRescanScannerStub()
+    ).execute(projectID: project.id)
+    let profiles = try await runtimeProfiles.list(projectID: project.id)
+
+    #expect(result.project.repoType == .git)
+    #expect(result.project.stackSummary == "Swift / Node.js")
+    #expect(result.createdProfiles.count == 1)
+    #expect(profiles.count == 2)
+    #expect(profiles.map(\.name).sorted() == ["api", "web"])
+}
+
+@Test
 func upsertAndLoadEnvSetResolvesEncryptedValuesFromSecretsStore() async throws {
     let envSets = EnvSetRepositorySpy()
     let secrets = SecretsStoreSpy()
@@ -60,6 +194,128 @@ func upsertAndLoadEnvSetResolvesEncryptedValuesFromSecretsStore() async throws {
 
     #expect(envSet.isEncrypted == true)
     #expect(snapshot?.resolvedVariables["TOKEN"] == "secret")
+}
+
+@Test
+func listCopyUnsetAndDeleteEnvSetUseCasesManageVariables() async throws {
+    let envSets = EnvSetRepositorySpy()
+    let secrets = SecretsStoreSpy()
+    let projectID = UUID()
+
+    _ = try await UpsertEnvSetUseCase(envSets: envSets, secrets: secrets).execute(
+        projectID: projectID,
+        name: "local",
+        variables: ["TOKEN": "secret", "BASE_URL": "http://localhost"],
+        encrypted: true
+    )
+
+    let listed = try await ListEnvSetsUseCase(envSets: envSets, secrets: secrets).execute(projectID: projectID)
+    let copied = try await CopyEnvSetUseCase(envSets: envSets, secrets: secrets).execute(
+        projectID: projectID,
+        sourceName: "local",
+        targetName: "staging"
+    )
+    let updated = try await UnsetEnvVariablesUseCase(envSets: envSets, secrets: secrets).execute(
+        projectID: projectID,
+        name: "staging",
+        keys: ["TOKEN"]
+    )
+    let deleted = try await DeleteEnvSetUseCase(envSets: envSets, secrets: secrets).execute(
+        projectID: projectID,
+        name: "local"
+    )
+    let remaining = try await envSets.list(projectID: projectID)
+
+    #expect(listed.count == 1)
+    #expect(copied?.resolvedVariables["TOKEN"] == "secret")
+    #expect(updated?.resolvedVariables.keys.sorted() == ["BASE_URL"])
+    #expect(deleted?.name == "local")
+    #expect(remaining.count == 1)
+}
+
+@Test
+func createUpdateAndDeleteRuntimeProfileUseCasesManageProfiles() async throws {
+    let runtimeProfiles = RuntimeProfileRepositorySpy()
+    let projectID = UUID()
+
+    let created = try await CreateRuntimeProfileUseCase(runtimeProfiles: runtimeProfiles).execute(
+        projectID: projectID,
+        name: "api",
+        entryCommand: "swift",
+        workingDir: "/tmp/api",
+        args: ["run"]
+    )
+    let updated = try await UpdateRuntimeProfileUseCase(runtimeProfiles: runtimeProfiles).execute(
+        profileID: created.id,
+        name: "api-dev",
+        entryCommand: "swift",
+        workingDir: "/tmp/api",
+        args: ["run", "--debug"]
+    )
+    let loaded = try await GetRuntimeProfileUseCase(runtimeProfiles: runtimeProfiles).execute(profileID: created.id)
+    try await DeleteRuntimeProfileUseCase(runtimeProfiles: runtimeProfiles).execute(profileID: created.id)
+
+    #expect(updated.name == "api-dev")
+    #expect(updated.args == ["run", "--debug"])
+    #expect(loaded?.name == "api-dev")
+    #expect(try await runtimeProfiles.get(id: created.id) == nil)
+}
+
+@Test
+func runtimeProfileEnvDependencyHealthAndRestartUseCasesUpdateFields() async throws {
+    let runtimeProfiles = RuntimeProfileRepositorySpy()
+    let envSets = EnvSetRepositorySpy()
+    let projectID = UUID()
+
+    let profile = RuntimeProfile(projectID: projectID, name: "api", entryCommand: "swift", workingDir: "/tmp/api")
+    let dependency = RuntimeProfile(projectID: projectID, name: "db", entryCommand: "postgres", workingDir: "/tmp/db")
+    let envSet = EnvSet(projectID: projectID, name: "local", variables: [:], isEncrypted: true)
+    try await runtimeProfiles.save(profile)
+    try await runtimeProfiles.save(dependency)
+    try await envSets.save(envSet)
+
+    let attached = try await AttachEnvSetToRuntimeProfileUseCase(
+        runtimeProfiles: runtimeProfiles,
+        envSets: envSets
+    ).execute(profileID: profile.id, envSetID: envSet.id)
+    let withDependency = try await AddRuntimeProfileDependencyUseCase(runtimeProfiles: runtimeProfiles).execute(
+        profileID: profile.id,
+        dependsOnProfileID: dependency.id
+    )
+    let withHealth = try await SetRuntimeProfileHealthCheckUseCase(runtimeProfiles: runtimeProfiles).execute(
+        profileID: profile.id,
+        type: .http,
+        target: "http://localhost:3000/health"
+    )
+    let withAutoRestart = try await SetRuntimeProfileAutoRestartUseCase(runtimeProfiles: runtimeProfiles).execute(
+        profileID: profile.id,
+        enabled: true
+    )
+    let withoutDependency = try await RemoveRuntimeProfileDependencyUseCase(runtimeProfiles: runtimeProfiles).execute(
+        profileID: profile.id,
+        dependsOnProfileID: dependency.id
+    )
+    let detached = try await DetachEnvSetFromRuntimeProfileUseCase(runtimeProfiles: runtimeProfiles).execute(profileID: profile.id)
+
+    #expect(attached.envSetID == envSet.id)
+    #expect(withDependency.dependsOn == [dependency.id])
+    #expect(withHealth.healthCheckType == .http)
+    #expect(withHealth.healthCheckTarget == "http://localhost:3000/health")
+    #expect(withAutoRestart.autoRestart == true)
+    #expect(withoutDependency.dependsOn.isEmpty)
+    #expect(detached.envSetID == nil)
+}
+
+@Test
+func saveAndLoadProjectNoteUseCasesRoundTripContent() async throws {
+    let notes = ProjectNoteRepositorySpy()
+    let projectID = UUID()
+
+    let saved = try await SaveProjectNoteUseCase(notes: notes).execute(projectID: projectID, content: "CLI first")
+    let loaded = try await LoadProjectNoteUseCase(notes: notes).execute(projectID: projectID)
+
+    #expect(saved.content == "CLI first")
+    #expect(loaded?.content == "CLI first")
 }
 
 @Test
@@ -167,6 +423,43 @@ func runtimeHistoryUseCaseReturnsRepositoryOrderedSessions() async throws {
 }
 
 @Test
+func listRuntimeSessionsUseCaseFiltersByProjectAndStatus() async throws {
+    let projectID = UUID()
+    let otherProjectID = UUID()
+    let running = RunSession(
+        id: UUID(),
+        projectID: projectID,
+        runtimeProfileID: UUID(),
+        status: .running,
+        pid: 10,
+        startedAt: Date(timeIntervalSince1970: 2_000)
+    )
+    let stopped = RunSession(
+        id: UUID(),
+        projectID: projectID,
+        runtimeProfileID: UUID(),
+        status: .stopped,
+        pid: 11,
+        startedAt: Date(timeIntervalSince1970: 1_500)
+    )
+    let otherProject = RunSession(
+        id: UUID(),
+        projectID: otherProjectID,
+        runtimeProfileID: UUID(),
+        status: .failed,
+        pid: 12,
+        startedAt: Date(timeIntervalSince1970: 1_000)
+    )
+    let sessions = RunSessionRepositorySpy(history: [running, stopped, otherProject])
+
+    let filteredByProject = try await ListRuntimeSessionsUseCase(sessions: sessions).execute(projectID: projectID, limit: 10)
+    let filteredByStatus = try await ListRuntimeSessionsUseCase(sessions: sessions).execute(status: .failed, limit: 10)
+
+    #expect(filteredByProject.map(\.id) == [running.id, stopped.id])
+    #expect(filteredByStatus.map(\.id) == [otherProject.id])
+}
+
+@Test
 func reconcileRuntimeSessionsStopsDeadRunningSessions() async throws {
     let projectID = UUID()
     let session = RunSession(
@@ -191,6 +484,39 @@ func reconcileRuntimeSessionsStopsDeadRunningSessions() async throws {
     #expect(reconciled.first?.sessionID == session.id)
     #expect(stored?.status == .stopped)
     #expect(stored?.endedAt != nil)
+}
+
+@Test
+func diagnoseRuntimeSessionsReportsWhetherPidsAreAlive() async throws {
+    let runningProjectID = UUID()
+    let runningSession = RunSession(
+        id: UUID(),
+        projectID: runningProjectID,
+        runtimeProfileID: UUID(),
+        status: .running,
+        pid: 1234,
+        startedAt: Date()
+    )
+    let missingPIDSession = RunSession(
+        id: UUID(),
+        projectID: UUID(),
+        runtimeProfileID: UUID(),
+        status: .running,
+        pid: nil,
+        startedAt: Date()
+    )
+    let sessions = RunSessionRepositoryWithRecordSpy()
+    try await sessions.save(runningSession)
+    try await sessions.save(missingPIDSession)
+
+    let items = try await DiagnoseRuntimeSessionsUseCase(
+        sessions: sessions,
+        processInspector: ProcessInspectorSpy(runningPIDs: [1234])
+    ).execute()
+
+    #expect(items.count == 2)
+    #expect(items.first(where: { $0.sessionID == runningSession.id })?.processRunning == true)
+    #expect(items.first(where: { $0.sessionID == missingPIDSession.id })?.processRunning == false)
 }
 
 actor RuntimeProfileRepositorySpy: RuntimeProfileRepository {
@@ -233,6 +559,38 @@ actor EnvSetRepositorySpy: EnvSetRepository {
     }
 }
 
+actor MilestoneRepositorySpy: MilestoneRepository {
+    private var storage: [Milestone.ID: Milestone] = [:]
+
+    func list(projectID: Project.ID) async throws -> [Milestone] {
+        storage.values.filter { $0.projectID == projectID }
+    }
+
+    func get(id: Milestone.ID) async throws -> Milestone? {
+        storage[id]
+    }
+
+    func save(_ milestone: Milestone) async throws {
+        storage[milestone.id] = milestone
+    }
+
+    func delete(id: Milestone.ID) async throws {
+        storage.removeValue(forKey: id)
+    }
+}
+
+actor ProjectNoteRepositorySpy: ProjectNoteRepository {
+    private var storage: [Project.ID: ProjectNote] = [:]
+
+    func get(projectID: Project.ID) async throws -> ProjectNote? {
+        storage[projectID]
+    }
+
+    func save(_ note: ProjectNote) async throws {
+        storage[note.projectID] = note
+    }
+}
+
 actor RunSessionRepositorySpy: RunSessionRepository {
     private let history: [RunSession]
 
@@ -242,6 +600,14 @@ actor RunSessionRepositorySpy: RunSessionRepository {
 
     func list(projectID: Project.ID, limit: Int) async throws -> [RunSession] {
         Array(history.filter { $0.projectID == projectID }.prefix(limit))
+    }
+
+    func listAll(limit: Int, status: RunSessionStatus?) async throws -> [RunSession] {
+        Array(
+            history
+                .filter { status == nil || $0.status == status }
+                .prefix(limit)
+        )
     }
 
     func listRunning() async throws -> [RunSession] {
@@ -257,7 +623,21 @@ actor RunSessionRepositoryWithRecordSpy: RunSessionRepository {
     private var storage: [RunSession.ID: RunSession] = [:]
 
     func list(projectID: Project.ID, limit: Int) async throws -> [RunSession] {
-        Array(storage.values.prefix(limit))
+        Array(
+            storage.values
+                .filter { $0.projectID == projectID }
+                .sorted { $0.startedAt > $1.startedAt }
+                .prefix(limit)
+        )
+    }
+
+    func listAll(limit: Int, status: RunSessionStatus?) async throws -> [RunSession] {
+        Array(
+            storage.values
+                .filter { status == nil || $0.status == status }
+                .sorted { $0.startedAt > $1.startedAt }
+                .prefix(limit)
+        )
     }
 
     func listRunning() async throws -> [RunSession] {
@@ -389,6 +769,20 @@ struct ProjectScannerWithProfilesStub: ProjectScanner {
     func scan(at path: String) async throws -> ProjectScanResult {
         ProjectScanResult(
             suggestedName: "Example",
+            repoType: .git,
+            stackSummary: "Swift / Node.js",
+            discoveredProfiles: [
+                DiscoveredRuntimeProfile(name: "web", entryCommand: "npm", workingDir: path, args: ["run", "dev"]),
+                DiscoveredRuntimeProfile(name: "api", entryCommand: "swift", workingDir: path, args: ["run"])
+            ]
+        )
+    }
+}
+
+struct ProjectRescanScannerStub: ProjectScanner {
+    func scan(at path: String) async throws -> ProjectScanResult {
+        ProjectScanResult(
+            suggestedName: "Maker",
             repoType: .git,
             stackSummary: "Swift / Node.js",
             discoveredProfiles: [

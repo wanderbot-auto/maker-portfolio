@@ -3,6 +3,8 @@ import Foundation
 public struct AppPaths: Sendable {
     public static let daemonPort: UInt16 = 47832
     public static let daemonLaunchAgentLabel = "com.makerportfolio.daemon"
+    public static let applicationSupportOverrideEnv = "MAKER_APP_SUPPORT_DIR"
+    public static let launchAgentsOverrideEnv = "MAKER_LAUNCH_AGENTS_DIR"
 
     public let applicationSupportDirectory: URL
     public let launchAgentsDirectory: URL
@@ -19,10 +21,13 @@ public struct AppPaths: Sendable {
         applicationSupportDirectory: URL? = nil,
         launchAgentsDirectory: URL? = nil
     ) {
+        let environment = ProcessInfo.processInfo.environment
         let base = applicationSupportDirectory ??
+            environment[Self.applicationSupportOverrideEnv].map { URL(fileURLWithPath: $0, isDirectory: true) } ??
             fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("MakerPortfolio", isDirectory: true)
         let launchAgents = launchAgentsDirectory ??
+            environment[Self.launchAgentsOverrideEnv].map { URL(fileURLWithPath: $0, isDirectory: true) } ??
             fileManager.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
 

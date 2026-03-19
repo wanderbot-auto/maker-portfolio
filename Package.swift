@@ -67,6 +67,11 @@ let package = Package(
             name: "MakerInfrastructureTests",
             dependencies: ["MakerInfrastructure", "MakerDomain", "MakerApplication", "MakerSupport", "MakerAdapters"],
             path: "Tests/MakerInfrastructureTests"
+        ),
+        .testTarget(
+            name: "MakerCLITests",
+            dependencies: ["MakerCLI", "MakerInfrastructure"],
+            path: "Tests/MakerCLITests"
         )
     ]
 )
