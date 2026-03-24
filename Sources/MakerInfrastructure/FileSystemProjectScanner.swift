@@ -43,10 +43,7 @@ public struct FileSystemProjectScanner: ProjectScanner {
               let text = String(data: data, encoding: .utf8) else {
             return nil
         }
-        return text
-            .split(separator: "\n")
-            .prefix(3)
-            .joined(separator: "\n")
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func discoverProfiles(fileNames: Set<String>, workingDir: String) -> [DiscoveredRuntimeProfile] {

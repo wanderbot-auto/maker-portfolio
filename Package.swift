@@ -12,7 +12,8 @@ let package = Package(
         .library(name: "MakerSupport", targets: ["MakerSupport"]),
         .library(name: "MakerAdapters", targets: ["MakerAdapters"]),
         .library(name: "MakerInfrastructure", targets: ["MakerInfrastructure"]),
-        .executable(name: "maker", targets: ["MakerCLI"])
+        .executable(name: "maker", targets: ["MakerCLI"]),
+        .executable(name: "maker-desktop", targets: ["MakerDesktop"])
     ],
     targets: [
         // Core domain layer: pure models and rules.
@@ -47,6 +48,11 @@ let package = Package(
             name: "MakerCLI",
             dependencies: ["MakerDomain", "MakerApplication", "MakerInfrastructure", "MakerSupport", "MakerAdapters"],
             path: "Sources/MakerCLI"
+        ),
+        .executableTarget(
+            name: "MakerDesktop",
+            dependencies: ["MakerDomain", "MakerApplication", "MakerInfrastructure", "MakerSupport", "MakerAdapters"],
+            path: "Sources/MakerDesktop"
         ),
         .testTarget(
             name: "MakerDomainTests",
